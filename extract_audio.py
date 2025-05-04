@@ -5,10 +5,10 @@ from pathlib import Path
 from typing import Optional, List
 
 # === Configuration ===
-INPUT_DIR = Path("/home/taresh/Downloads/anime/videos/AOT_S3")
-OUTPUT_DIR = Path("/home/taresh/Downloads/anime/audios/AOT_S3")
+INPUT_DIR = Path("/home/taresh/Downloads/anime/videos/Konosuba_s2")
+OUTPUT_DIR = Path("/home/taresh/Downloads/anime/audios/Konosuba_s2/orig")
 PREFERRED_LANG_CODES: List[str] = ["eng", "en", "english"]  
-OUTPUT_SAMPLE_RATE: Optional[str] = None   # e.g. "48000" to resample, or None to keep original
+OUTPUT_SAMPLE_RATE: Optional[str] = "44100"   # e.g. "48000" to resample, or None to keep original
 OUTPUT_CODEC = "flac"
 
 # Ensure output dir exists

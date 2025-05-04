@@ -8,22 +8,22 @@ import numpy as np
 import yaml
 from tqdm.auto import tqdm
 from typing import Optional, Literal, List
-import torch.nn as nn # Import nn module
+import torch.nn as nn
 from ml_collections import ConfigDict
 
 from models.bs_roformer import MelBandRoformer
 from utils import demix 
 
-
 import warnings
 warnings.filterwarnings("ignore")
 
-SAMPLING_RATE = 44100 # Define a default or common sampling rate
+SAMPLING_RATE = 44100
 
 class VocalSeparator:
     """
-    A class to perform vocal separation on audio files within a folder using
-    a pre-trained MelBandRoformer model. Supports single or multi-GPU processing.
+    A class to perform vocal separation on audio files (WAV or FLAC) within
+    a folder using a pre-trained MelBandRoformer model.
+    Supports single or multi-GPU processing. Outputs separated vocals losslessly.
     """
     def __init__(self,
                  model_path: str,
@@ -31,28 +31,10 @@ class VocalSeparator:
                  output_dir: str,
                  model_type: str = 'mel_band_roformer',
                  use_gpu: bool = True,
-                 gpu_ids: Optional[List[int]] = None, # New parameter for specific GPU IDs
-                 output_format: Literal['wav', 'flac'] = 'wav',
-                 output_pcm_type: Literal['PCM_16', 'PCM_24', 'FLOAT'] = 'FLOAT'):
-        """
-        Initializes the VocalSeparator.
+                 gpu_ids: Optional[List[int]] = [0],
+                 output_format: Literal['wav', 'flac'] = 'flac',
+                 output_pcm_type: Literal['PCM_16', 'PCM_24', 'FLOAT'] = 'PCM_24'):
 
-        Args:
-            model_path: Path to the pre-trained model checkpoint (.pth file).
-            config_path: Path to the model configuration YAML file.
-            output_dir: Directory where separated vocal files will be saved.
-            model_type: Type identifier for the model (used by demix function).
-                        Defaults to 'mel_band_roformer'.
-            use_gpu: If True, attempts to use CUDA devices. Defaults to True.
-            gpu_ids: A list of specific GPU IDs to use (e.g., [0, 1]).
-                     If None or empty and use_gpu is True, uses GPU 0 if available.
-                     If use_gpu is False, this parameter is ignored. Defaults to None.
-            output_format: Format for the output files ('wav' or 'flac').
-                           Defaults to 'wav'.
-            output_pcm_type: PCM type for output. Defaults to 'FLOAT'.
-                             Relevant for FLAC ('PCM_16', 'PCM_24') and WAV.
-                             'FLOAT' is common for WAV processing.
-        """
         print("Initializing Vocal Separator...")
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Model path not found: {model_path}")
@@ -64,7 +46,7 @@ class VocalSeparator:
         self.output_dir = output_dir
         self.model_type = model_type
         self.use_gpu = use_gpu
-        self.gpu_ids = gpu_ids # Store the provided GPU IDs
+        self.gpu_ids = gpu_ids
         self.output_format = output_format.lower()
         self.output_pcm_type = output_pcm_type
 
@@ -72,10 +54,11 @@ class VocalSeparator:
             raise ValueError("output_format must be 'wav' or 'flac'")
 
         self._load_config_and_model()
-        self._setup_device() # Device setup now considers gpu_ids
+        self._setup_device()
 
         os.makedirs(self.output_dir, exist_ok=True)
         print(f"Output directory set to: {self.output_dir}")
+        print(f"Output format: {self.output_format.upper()} ({self.output_pcm_type})")
         print("Initialization complete.")
 
     def _load_config_and_model(self):
@@ -91,22 +74,12 @@ class VocalSeparator:
             self.model = MelBandRoformer(**model_config_dict)
 
             print(f"Loading model weights from: {self.model_path}...")
-            # Load weights onto CPU first, then move model to target device(s)
             self.model.load_state_dict(
                 torch.load(self.model_path, map_location=torch.device('cpu'))
             )
-            self.model.eval() 
+            self.model.eval()
             print(f"Model loading took: {time.time() - load_start_time:.2f} seconds.")
 
-        except FileNotFoundError as e:
-            print(f"Error loading config file: {e}")
-            raise 
-        except yaml.YAMLError as e:
-            print(f"Error parsing YAML config file: {e}")
-            raise
-        except KeyError as e:
-             print(f"Error: Missing key {e} in model configuration.")
-             raise
         except Exception as e:
             print(f"An unexpected error occurred during model/config loading: {e}")
             raise
@@ -115,30 +88,22 @@ class VocalSeparator:
         """Sets up the computation device (CPU or specific GPU(s))."""
         if self.use_gpu and torch.cuda.is_available():
             num_gpus = torch.cuda.device_count()
-            if self.gpu_ids:
-                # Validate provided GPU IDs
-                valid_ids = [i for i in self.gpu_ids if i >= 0 and i < num_gpus]
-                if not valid_ids:
-                    print(f"Warning: Provided GPU IDs {self.gpu_ids} are invalid or unavailable (found {num_gpus} GPUs). Falling back to CPU.")
-                    self.device = torch.device('cpu')
-                    self.model = self.model.to(self.device)
-                elif len(valid_ids) == 1:
-                    # Use a single specified GPU
-                    self.device = torch.device(f'cuda:{valid_ids[0]}')
-                    self.model = self.model.to(self.device)
-                    print(f"Using specified single GPU: cuda:{valid_ids[0]}")
-                else:
-                    # Use multiple specified GPUs with DataParallel
-                    self.device = torch.device(f'cuda:{valid_ids[0]}') # Primary device
-                    # Important: Wrap model *before* moving it if DataParallel handles placement
-                    self.model = nn.DataParallel(self.model, device_ids=valid_ids) 
-                    self.model.to(self.device) # Move the wrapped model
-                    print(f"Using {len(valid_ids)} GPUs with DataParallel: {valid_ids}")
-            else:
-                # Default to GPU 0 if no specific IDs are given
-                self.device = torch.device('cuda:0')
+            # Validate provided GPU IDs
+            valid_ids = [i for i in self.gpu_ids if i >= 0 and i < num_gpus]
+            if not valid_ids:
+                print(f"Warning: Provided GPU IDs {self.gpu_ids} are invalid or unavailable (found {num_gpus} GPUs). Falling back to CPU.")
+                self.device = torch.device('cpu')
                 self.model = self.model.to(self.device)
-                print(f"Using default GPU: cuda:0")
+            elif len(valid_ids) == 1:
+                self.device = torch.device(f'cuda:{valid_ids[0]}')
+                self.model = self.model.to(self.device)
+                print(f"Using specified single GPU: cuda:{valid_ids[0]}")
+            else:
+                self.device = torch.device(f'cuda:{valid_ids[0]}') # Primary device
+                # Important: Wrap model *before* moving it if DataParallel handles placement
+                self.model = nn.DataParallel(self.model, device_ids=valid_ids) 
+                self.model.to(self.device) # Move the wrapped model
+                print(f"Using {len(valid_ids)} GPUs with DataParallel: {valid_ids}")
         else:
             # Use CPU
             self.device = torch.device('cpu')
@@ -147,6 +112,7 @@ class VocalSeparator:
                 print("CUDA not available, using CPU.")
             else:
                 print("Using CPU as requested.")
+
 
     def _prepare_audio(self, mix: np.ndarray) -> np.ndarray:
         """Checks audio channels and converts mono to stereo if needed by config."""
@@ -164,19 +130,32 @@ class VocalSeparator:
 
         return mix
 
+
     def _process_file(self, file_path: str):
         """Loads, processes, and saves the vocals for a single audio file."""
         print(f"\nProcessing: {os.path.basename(file_path)}")
         
         target_sr = self.config.audio.get('sample_rate', SAMPLING_RATE)
-        
+
         try:
-            mix, sr = librosa.load(file_path, sr=target_sr, mono=False)
+            mix_orig, sr_orig = librosa.load(file_path, sr=None, mono=False)
+
+            # Resample if needed AFTER loading
+            if sr_orig != target_sr:
+                print(f"  Resampling from {sr_orig} Hz to {target_sr} Hz...")
+                # Ensure mix_orig is 2D before resampling multichannel
+                if mix_orig.ndim == 1:
+                    mix_orig = np.expand_dims(mix_orig, axis=0)
+                mix = librosa.resample(mix_orig, orig_sr=sr_orig, target_sr=target_sr, res_type='kaiser_best')
+                print(f"  Done resampling")
+            else:
+                mix = mix_orig 
+
         except Exception as e:
             print(f'--> ERROR: Cannot read track: {os.path.basename(file_path)}')
             print(f'     Error message: {str(e)}')
             return 
-
+        
         mix = self._prepare_audio(mix)
 
         try:
@@ -191,7 +170,7 @@ class VocalSeparator:
             print(f"--> ERROR: Failed to demix track: {os.path.basename(file_path)}")
             print(f"     Error message: {str(e)}")
             return 
-
+        
         instruments = self.config.training.get('instruments', [])
         target_instrument = self.config.training.get('target_instrument', None)
         
@@ -214,7 +193,7 @@ class VocalSeparator:
         file_name_base = os.path.splitext(os.path.basename(file_path))[0]
         output_filename = f"{file_name_base}_vocals.{self.output_format}"
         output_path = os.path.join(self.output_dir, output_filename)
-        
+
         subtype = self.output_pcm_type
         if self.output_format == 'wav' and subtype not in ['PCM_16', 'PCM_24', 'FLOAT']:
              print(f"Warning: Invalid pcm_type '{subtype}' for WAV output. Defaulting to 'FLOAT'.")
@@ -251,14 +230,14 @@ class VocalSeparator:
         start_time = time.time()
         print(f"\nStarting processing for folder: {input_folder}")
         
-        all_mixtures_path = glob.glob(os.path.join(input_folder, '*.wav')) 
+        all_mixtures_path = glob.glob(os.path.join(input_folder, '*.flac')) 
         total_tracks = len(all_mixtures_path)
 
         if total_tracks == 0:
-            print("No .wav files found in the input folder.")
+            print("No .flac files found in the input folder.")
             return
             
-        print(f"Found {total_tracks} '.wav' tracks to process.")
+        print(f"Found {total_tracks} '.flac' tracks to process.")
 
         # Use tqdm for overall progress
         for file_path in tqdm(all_mixtures_path, desc="Processing audio files"):
@@ -266,19 +245,19 @@ class VocalSeparator:
 
         print(f"\nFolder processing finished. Elapsed time: {time.time() - start_time:.2f} seconds.")
 
-# Example of how to use this class from another script:
+
 if __name__ == "__main__":
     # --- Configuration ---
-    MODEL_PATH = "path/to/your/model.pth"  # REQUIRED: Update this path
-    CONFIG_PATH = "path/to/your/config.yaml" # REQUIRED: Update this path
-    INPUT_FOLDER = "path/to/your/input_audio" # REQUIRED: Update this path
-    OUTPUT_FOLDER = "path/to/your/output_vocals" # REQUIRED: Update this path
+    MODEL_PATH = "weights/kimmel_unwa_ft2_bleedless.ckpt" 
+    CONFIG_PATH = "configs/config_kimmel_unwa_ft.yaml"
+    INPUT_FOLDER = "/home/taresh/Downloads/anime/audios/Frieren/orig"
+    OUTPUT_FOLDER = "/home/taresh/Downloads/anime/audios/Frieren/vocals"
     
     USE_GPU = True 
     GPU_IDS = [0]
                    
-    OUTPUT_FORMAT = 'wav' 
-    OUTPUT_PCM_TYPE = 'FLOAT'
+    OUTPUT_FORMAT = 'flac' 
+    OUTPUT_PCM_TYPE = 'PCM_24'
     MODEL_TYPE = 'mel_band_roformer' 
 
     separator = VocalSeparator(
@@ -295,4 +274,3 @@ if __name__ == "__main__":
     separator.process_folder(INPUT_FOLDER)
 
     print("\nProcessing completed successfully!")
-

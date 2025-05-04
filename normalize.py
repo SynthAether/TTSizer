@@ -2,10 +2,12 @@ import json
 import subprocess
 from pathlib import Path
 
-INPUT_DIR = Path("/path/to/raw_flacs")       # Directory containing input .flac files
-OUTPUT_DIR = Path("/path/to/processed_flacs")  # Where to save processed .flac files
+INPUT_DIR = Path("/home/taresh/Downloads/anime/audios/Dandadan/vocals")       # Directory containing input .flac files
+OUTPUT_DIR = Path("/home/taresh/Downloads/anime/audios/Dandadan/vocals_normalized")  # Where to save processed .flac files
 TARGET_LUFS = -20.0    # Integrated loudness target in LUFS (moderate for speech)
 TARGET_TP = -1.5        # True-peak target in dBTP
+
+SAMPLE_RATE = 44100
 
 
 def run_ffmpeg_command(cmd: list) -> subprocess.CompletedProcess:
@@ -65,6 +67,7 @@ def normalize_and_convert(input_path: Path, stats: dict) -> None:
         "ffmpeg", "-hide_banner", "-nostats", "-i", str(input_path),
         "-af", loudnorm_filter,
         "-ac", "1",        # convert to mono
+        "-ar", str(SAMPLE_RATE),
         "-c:a", "flac",     # encode as FLAC (lossless)
         str(output_path)
     ]
