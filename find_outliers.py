@@ -22,7 +22,7 @@ INPUT_DIR = 'temp/segmented_vocals_e10_final2' # Directory containing speaker su
 # *** WeSpeaker Configuration ***
 # REQUIRED: Update this path to the directory where your downloaded WeSpeaker ResNet model files are located
 # (e.g., the directory containing avg_model.pt, config.yaml)
-WESPEAKER_MODEL_DIR = "/Workspace/tr/repos/wespeaker-voxceleb-resnet293-LM"
+WESPEAKER_MODEL_DIR = "/home/taresh/Downloads/dev/TTSizer/weights/wespeaker-voxceleb-resnet293-LM"
 
 # Target sample rate expected by the WeSpeaker model (Likely 16000, CHECK MODEL DOCS)
 TARGET_SR = 16000

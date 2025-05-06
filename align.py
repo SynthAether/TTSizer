@@ -7,365 +7,323 @@ import torch
 import soundfile as sf
 import numpy as np
 import math
-import re # Added import for re
+import re
+import json
+import tempfile
+from pathlib import Path
 from tqdm.auto import tqdm
 from typing import List, Dict, Optional, Tuple
-from transformers import AutoModelForCTC, AutoTokenizer # Direct import for custom loader
+from transformers import AutoModelForCTC, AutoTokenizer
 
-# Assuming ctc_forced_aligner is installed or accessible in the environment
-# We still need its functions other than load_alignment_model
-try:
-    from ctc_forced_aligner import (
-        generate_emissions,
-        get_alignments,
-        get_spans,
-        # load_alignment_model, # Don't import the original loader
-        postprocess_results,
-        preprocess_text,
-        load_audio,
-    )
-except ImportError as e:
-     print(f"Error: Could not import from 'ctc_forced_aligner'.")
-     print(f"Please ensure the library is installed correctly: pip install ctc-forced-aligner")
-     print(f"Original error: {e}")
-     # Exit if the core library is missing
-     import sys
-     sys.exit(1)
-
+from ctc_forced_aligner import (generate_emissions, get_alignments, get_spans,
+                                    postprocess_results, preprocess_text, load_audio)
 
 # --- Custom Model Loader ---
-def load_alignment_model_custom(
-    device: str,
-    model_path: str,
-    dtype: torch.dtype = torch.float32,
-):
-    """
-    Loads alignment model and tokenizer without attn_implementation argument.
-    """
-    print(f"Loading custom: Model={model_path}, Dtype={dtype}, Device={device}")
+def load_alignment_model_custom(device: str, model_path: str, dtype: torch.dtype = torch.float32):
+    """Loads alignment model and tokenizer without unsupported args."""
+    print(f"Loading alignment model: {model_path}...")
     try:
-        model = (
-            AutoModelForCTC.from_pretrained(
-                model_path,
-                torch_dtype=dtype,
-            )
-            .to(device)
-            .eval()
-        )
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_path
-            )
-        print("Custom model/tokenizer loading successful.")
+        model = AutoModelForCTC.from_pretrained(model_path, torch_dtype=dtype).to(device).eval()
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
+        print("Alignment model loaded.")
         return model, tokenizer
     except Exception as e:
-        print(f"Error during custom model loading for '{model_path}': {e}")
+        print(f"Error loading alignment model '{model_path}': {e}")
         raise
 
 # --- Helper Functions ---
 def _time_str_to_seconds(time_str: str) -> float:
-    """Converts HH:MM:SS.mmm or MM:SS.mmm string to seconds."""
+    """Converts MM:SS.mmm string to seconds."""
     parts = time_str.split(':')
     try:
-        if len(parts) == 3: # HH:MM:SS.mmm
-            h, m, s = map(float, parts)
-            return h * 3600 + m * 60 + s
-        elif len(parts) == 2: # MM:SS.mmm
+        if len(parts) == 2:
             m, s = map(float, parts)
+            if s >= 60.0: m += math.floor(s / 60.0); s %= 60.0
             return m * 60 + s
-        elif len(parts) == 1: # S.mmm
-            return float(parts[0])
-        else:
-            raise ValueError(f"Unexpected time format parts: {len(parts)}")
+        elif len(parts) == 1: return float(parts[0])
+        else: raise ValueError(f"Expected MM:SS.mmm format, got {len(parts)} parts.")
     except ValueError as e:
          raise ValueError(f"Invalid time format: '{time_str}'. Error: {e}")
 
-
 def _sanitize_filename(name: str) -> str:
-    """Removes or replaces characters invalid for filenames/directory names."""
+    """Creates a safe filename."""
     name = re.sub(r'[<>:"/\\|?*]', '', name)
     name = name.replace(' ', '_')
     return name
 # --- End Helper Functions ---
 
-
-def align_single_file(
-    audio_path: str,
-    transcript: str,
-    alignment_model, # Pass loaded model
-    alignment_tokenizer, # Pass loaded tokenizer
-    device: str,
-    language: str = 'en',
-    romanize: bool = False,
-    batch_size: int = 8
-) -> Optional[float]:
-    """
-    Performs forced alignment on a single audio file and transcript.
-    Returns the precise end time (in seconds) of the last word in the alignment,
-    or None if alignment fails or the transcript is empty.
-    """
+def align_single_temp_file(
+    temp_audio_path: str, transcript: str, alignment_model, alignment_tokenizer,
+    device: str, language: str = 'en', batch_size: int = 8
+) -> Optional[Tuple[float, float]]:
+    """Aligns a temporary audio file, returns relative start/end times of content."""
     # (Function implementation remains the same as the previous correct version)
-    if not transcript:
-        # print(f"  Skipping alignment for {os.path.basename(audio_path)}: Empty transcript.") # Reduced verbosity
-        return None
-
+    if not transcript: return None
     try:
         model_dtype = alignment_model.dtype
-        audio_waveform = load_audio(audio_path, dtype=model_dtype, device=device)
-        if audio_waveform is None or audio_waveform.nelement() == 0:
-            print(f"  Skipping alignment for {os.path.basename(audio_path)}: Failed to load or empty audio.")
-            return None
+        audio_waveform = load_audio(temp_audio_path, dtype=model_dtype, device=device)
+        if audio_waveform is None or audio_waveform.nelement() == 0: return None
 
         with torch.no_grad():
-             emissions, stride = generate_emissions(
-                 alignment_model,
-                 audio_waveform,
-                 batch_size=batch_size,
-             )
+             emissions, stride = generate_emissions(alignment_model, audio_waveform, batch_size=batch_size)
 
         tokens_starred, text_starred = preprocess_text(
-            transcript,
-            romanize=romanize,
-            language=language,
-            split_size='word',
-            star_frequency='edges'
+            transcript, romanize=True, language=language, split_size='word', star_frequency='edges'
         )
-
-        segments, scores, blank_token = get_alignments(
-            emissions,
-            tokens_starred,
-            alignment_tokenizer,
-        )
-
+        segments, scores, blank_token = get_alignments(emissions, tokens_starred, alignment_tokenizer)
         spans = get_spans(tokens_starred, segments, blank_token)
+        word_timestamps = postprocess_results(text_starred, spans, stride, scores)
 
-        word_timestamps = postprocess_results(
-            text_starred=text_starred,
-            spans=spans,
-            stride=stride,
-            scores=scores
-            )
+        first_word, last_word = None, None
+        for seg in word_timestamps:
+            if seg.get('text') and seg['text'] != '<star>':
+                if first_word is None: first_word = seg
+                last_word = seg
 
-        if word_timestamps:
-            last_real_word_segment = None
-            for seg in reversed(word_timestamps):
-                if seg.get('text') and seg['text'] != '<star>':
-                    last_real_word_segment = seg
-                    break
-
-            if last_real_word_segment and 'end' in last_real_word_segment:
-                final_end_time = last_real_word_segment['end']
-                return final_end_time
-            else:
-                 print(f"  Warning for {os.path.basename(audio_path)}: No non-star text segments found after alignment.")
-                 return None
+        if first_word and last_word and 'start' in first_word and 'end' in last_word:
+            start_rel, end_rel = first_word['start'], last_word['end']
+            return (start_rel, end_rel) if end_rel > start_rel else None
         else:
-            print(f"  Warning for {os.path.basename(audio_path)}: Alignment produced no word timestamps.")
+            print(f"  Warning: Could not extract valid start/end from alignment for {os.path.basename(temp_audio_path)}.")
             return None
-        
-        # if word_timestamps:
-        #     return word_timestamps[-1]['end']
-        # return None 
-
-    except FileNotFoundError:
-        print(f"  Error: Audio file not found during alignment processing: {audio_path}")
-        return None
     except Exception as e:
-        print(f"  Error during alignment for {os.path.basename(audio_path)}: {type(e).__name__} - {e}")
+        print(f"  Error during alignment for {os.path.basename(temp_audio_path)}: {e}")
         return None
 
 
-def process_directory(
-    input_audio_dir: str,
-    input_txt_dir: str,
-    output_audio_dir: str,
-    aligner_model_name: str = "MahmoudAshraf/mms-300m-1130-forced-aligner",
+def process_episodes(
+    input_json_dir: str,
+    original_audio_dir: str,
+    output_base_dir: str,
+    target_speakers: List[str],
+    aligner_model_name: str,
     language: str = 'en',
-    use_gpu: bool = True):
-    """
-    Processes a directory of audio segments and text files, performs forced
-    alignment to find precise end times, and saves correctly clipped audio.
-    """
-    print("Starting precise audio segment clipping...")
-    # ... (Initial prints and device setup remain the same) ...
-    if use_gpu and torch.cuda.is_available():
-        device = "cuda"
-        print(f"Using GPU (CUDA): {torch.cuda.get_device_name(0)}")
-    else:
-        device = "cpu"
-        if use_gpu: print("CUDA not available, using CPU.")
-        else: print("Using CPU.")
+    padding_seconds: float = 0.75,
+    use_gpu: bool = True,
+    min_duration_seconds: float = 0.4, # New parameter for min duration
+    min_words_in_transcript: int = 2   # New parameter for min words
+    ):
+    """Processes JSONs, aligns padded segments, filters short/simple ones, saves refined clips."""
 
-    print(f"Loading alignment model: {aligner_model_name}...")
+    print("Starting Precise Segmentation Workflow...")
+    # ... (Initial prints remain the same) ...
+    print(f"Min Duration Filter : {min_duration_seconds}s")
+    print(f"Min Words Filter    : {min_words_in_transcript}")
+
+
+    # --- Setup Device & Load Model (Once) ---
+    device = "cuda" if use_gpu and torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device.upper()}")
     try:
         compute_dtype = torch.float16 if device == "cuda" else torch.float32
         alignment_model, alignment_tokenizer = load_alignment_model_custom(
-            device=device, model_path=aligner_model_name, dtype=compute_dtype
+            device, aligner_model_name, compute_dtype
         )
-        print("Alignment model loaded successfully.")
     except Exception as e:
-        print(f"Exiting due to model loading error.")
+        print(f"FATAL: Could not load alignment model. Exiting. Error: {e}")
         return
 
-    try:
-        os.makedirs(output_audio_dir, exist_ok=True)
-    except OSError as e:
-         print(f"Error creating output directory {output_audio_dir}: {e}")
-         return
+    # --- Iterate Episodes (JSON files) ---
+    json_files = glob.glob(os.path.join(input_json_dir, '*.json'))
+    if not json_files:
+        print(f"Error: No .json files found in '{input_json_dir}'.")
+        return
+    print(f"Found {len(json_files)} JSON files to process.")
 
-    try:
-        # Find WAV files recursively within the input audio directory
-        # This assumes a structure like input_audio_dir/Speaker_Name/wav/audio.wav
-        audio_files = glob.glob(os.path.join(input_audio_dir, '**', '*.wav'), recursive=True)
+    total_processed_segments = 0
+    total_skipped_segments = 0
 
-        # Filter out files that are not in a '/wav/' subdirectory if that's expected structure
-        audio_files = [f for f in audio_files if os.path.basename(os.path.dirname(f)).lower() == 'wav']
+    for json_file_path in tqdm(json_files, desc="Processing Episodes"):
+        episode_name = Path(json_file_path).stem
+        print(f"\n--- Episode: {episode_name} ---")
+        original_audio_path = Path(original_audio_dir) / f"{episode_name}.flac"
 
-        if not audio_files:
-            print(f"Error: No .wav files found within a 'wav' subdirectory in '{input_audio_dir}'.")
-            return
-    except Exception as e:
-         print(f"Error finding audio files in {input_audio_dir}: {e}")
-         return
+        if not original_audio_path.is_file():
+            print(f"Error: Original audio not found at '{original_audio_path}'. Skipping episode.")
+            total_skipped_segments += 1
+            continue
 
-    print(f"Found {len(audio_files)} '.wav' files in 'wav' subdirectories to process.")
-    processed_count = 0
-    skipped_count = 0
-
-    for audio_path in tqdm(audio_files, desc="Aligning and Clipping"):
+        # --- Load Full Audio & JSON ---
         try:
-            # --- Corrected Transcript Path Logic ---
-            base_filename_no_ext = os.path.splitext(os.path.basename(audio_path))[0]
-            # Get the directory containing the audio file (e.g., .../Speaker_Name/wav)
-            audio_file_dir = os.path.dirname(audio_path)
-            # Get the parent directory (e.g., .../Speaker_Name)
-            speaker_base_dir = os.path.dirname(audio_file_dir)
-            # Get just the speaker name / final directory component
-            speaker_subdir_name = os.path.basename(speaker_base_dir)
+            print(f"  Loading audio: {original_audio_path.name}...")
+            audio_info = sf.info(str(original_audio_path))
+            original_samplerate = audio_info.samplerate
+            original_subtype = audio_info.subtype
+            full_audio_data, _ = sf.read(str(original_audio_path), dtype='float64', always_2d=True)
 
-            # Construct the transcript path using the input_txt_dir, speaker subdir, 'txt', and filename
-            transcript_path = os.path.join(input_txt_dir, speaker_subdir_name, 'txt', f"{base_filename_no_ext}.txt")
-            # ----------------------------------------
+            with open(json_file_path, 'r', encoding='utf-8') as f:
+                segments_data = json.load(f)
+            if not isinstance(segments_data, list): raise ValueError("JSON not a list")
+            print(f"  Loaded {len(segments_data)} segments from JSON.")
+        except Exception as e:
+            print(f"Error loading audio or JSON for {episode_name}: {e}. Skipping episode.")
+            total_skipped_segments += len(segments_data) if isinstance(segments_data, list) else 1
+            continue
 
-            # --- Check for Transcript ---
-            if not os.path.isfile(transcript_path):
-                # Print the path it *actually* checked for debugging
-                print(f"Warning: Transcript file not found for '{os.path.relpath(audio_path, input_audio_dir)}'. Expected at: '{transcript_path}'. Skipping.")
-                skipped_count += 1
+        # --- Process Segments ---
+        segment_counters: Dict[str, int] = {spkr: 0 for spkr in target_speakers}
+        ep_processed = 0
+        ep_skipped = 0
+        ep_filtered_duration = 0
+        ep_filtered_transcript = 0
+
+        for index, segment in enumerate(tqdm(segments_data, desc=f"Segments", leave=False)):
+            speaker = segment.get('speaker')
+            transcript = segment.get('transcript')
+            start_str = segment.get('start')
+            end_str = segment.get('end')
+
+            # --- Filter by Target Speaker ---
+            if speaker not in target_speakers:
+                continue # Silently skip non-target speakers
+
+            # --- Basic Data Validation ---
+            if not transcript or not start_str or not end_str:
+                ep_skipped += 1
                 continue
 
-            # --- Read Transcript ---
+            temp_wav_path = None
+            temp_txt_path = None
             try:
-                with open(transcript_path, 'r', encoding='utf-8') as f:
-                    transcript = f.read().strip()
-                if not transcript:
-                     # print(f"Warning: Transcript file is empty for '{relative_path}'. Skipping.")
-                     skipped_count += 1
+                gemini_start_time = _time_str_to_seconds(start_str)
+                gemini_end_time = _time_str_to_seconds(end_str)
+                if gemini_end_time <= gemini_start_time:
+                     ep_skipped += 1
                      continue
-            except Exception as e:
-                print(f"Warning: Error reading transcript '{transcript_path}': {e}. Skipping.")
-                skipped_count += 1
-                continue
 
-            # --- Get Precise End Time using Aligner ---
-            final_end_time = align_single_file(
-                audio_path,
-                transcript,
-                alignment_model,
-                alignment_tokenizer,
-                device,
-                language=language
-            )
-
-            if final_end_time is None:
-                skipped_count += 1
-                continue
-
-            # --- Load Original Segment, Slice, and Save ---
-            try:
-                info = sf.info(audio_path)
-                samplerate = info.samplerate
-                subtype = info.subtype
-                input_segment_audio, sr_read = sf.read(audio_path, dtype='float64', always_2d=True)
-
-                start_sample = 0
-                final_end_sample = min(input_segment_audio.shape[0], max(0, math.ceil(final_end_time * samplerate)))
-
-                if final_end_sample <= start_sample:
-                    print(f"Warning: Final sample range is invalid ({start_sample} >= {final_end_sample}) for '{os.path.relpath(audio_path, input_audio_dir)}' after alignment. Skipping.")
-                    skipped_count += 1
+                # --- *** FILTERING LOGIC *** ---
+                # 1. Duration Filter
+                duration = gemini_end_time - gemini_start_time
+                if duration < min_duration_seconds:
+                    # print(f"  Filter: Skipping segment {index} (Speaker: {speaker}): Duration {duration:.3f}s < {min_duration_seconds}s")
+                    ep_filtered_duration += 1
                     continue
 
-                output_audio_chunk = input_segment_audio[start_sample:final_end_sample]
+                # 2. Transcript Content Filter
+                words = transcript.split()
+                word_count = len(words)
+                is_bracketed_expression = transcript.startswith(('(', '[')) and transcript.endswith((')', ']'))
 
-                # Define output path, maintaining relative speaker structure but saving directly in output_audio_dir
-                # Example: output_audio_dir / Speaker_Name_0001.wav
-                # OR output_audio_dir / Speaker_Name / Speaker_Name_0001.wav
-                # Let's save directly into output_audio_dir for simplicity here, adjust if needed
-                output_filename = f"{base_filename_no_ext}.wav" # Use the original base filename
-                output_path = os.path.join(output_audio_dir, output_filename)
-
-                # If you want to replicate speaker subdirs in output:
-                # output_speaker_dir = os.path.join(output_audio_dir, speaker_subdir_name)
-                # os.makedirs(output_speaker_dir, exist_ok=True)
-                # output_path = os.path.join(output_speaker_dir, output_filename)
+                # Filter if word count is too low OR if it looks like a bracketed sound effect/note
+                if word_count < min_words_in_transcript or is_bracketed_expression:
+                    # print(f"  Filter: Skipping segment {index} (Speaker: {speaker}): Word count {word_count} < {min_words_in_transcript} or bracketed: '{transcript[:50]}...'")
+                    ep_filtered_transcript += 1
+                    continue
+                # --- *** END FILTERING LOGIC *** ---
 
 
-                sf.write(output_path, output_audio_chunk, samplerate, subtype=subtype)
-                processed_count += 1
+                # --- Pad and Extract Temporary Audio ---
+                padded_end_time = gemini_end_time + padding_seconds
+                start_sample = max(0, math.floor(gemini_start_time * original_samplerate))
+                padded_end_sample = min(full_audio_data.shape[0], math.ceil(padded_end_time * original_samplerate))
+                if start_sample >= padded_end_sample: continue
 
-            except FileNotFoundError:
-                print(f"Error: Input audio file vanished during processing? '{audio_path}'. Skipping.")
-                skipped_count +=1
-            except Exception as e:
-                print(f"Error processing/saving final clip for '{os.path.relpath(audio_path, input_audio_dir)}': {e}")
-                skipped_count += 1
+                padded_audio_chunk = full_audio_data[start_sample:padded_end_sample]
 
-        except Exception as outer_e:
-            print(f"An unexpected error occurred processing file '{audio_path}': {outer_e}")
-            skipped_count += 1
+                # --- Create & Run Aligner on Temporary Files ---
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav_f, \
+                     tempfile.NamedTemporaryFile(mode='w', suffix=".txt", delete=False, encoding='utf-8') as tmp_txt_f:
+                    temp_wav_path = tmp_wav_f.name
+                    temp_txt_path = tmp_txt_f.name
+                    sf.write(temp_wav_path, padded_audio_chunk, original_samplerate, subtype='PCM_16')
+                    tmp_txt_f.write(transcript)
+
+                alignment_times = align_single_temp_file(
+                    temp_wav_path, transcript, alignment_model, alignment_tokenizer, device, language
+                )
+
+                if alignment_times is None:
+                    # print(f"Warning: Alignment failed for segment {index} (Speaker: {speaker}). Skipping.")
+                    ep_skipped += 1
+                    continue
+
+                relative_start_time, relative_end_time = alignment_times
+                final_start_abs = gemini_start_time # Use Gemini start
+                final_end_abs = gemini_start_time + relative_end_time # Use aligned end
+
+                if final_end_abs <= final_start_abs: continue
+
+                # --- Extract Final Audio Clip ---
+                final_start_sample = max(0, math.floor(final_start_abs * original_samplerate))
+                final_end_sample = min(full_audio_data.shape[0], math.ceil(final_end_abs * original_samplerate))
+                if final_start_sample >= final_end_sample: continue
+
+                final_audio_chunk = full_audio_data[final_start_sample:final_end_sample]
+
+                # --- Prepare Output Paths and Save ---
+                sanitized_speaker = _sanitize_filename(speaker)
+                segment_counters[speaker] += 1
+                file_counter = segment_counters[speaker]
+                base_filename = f"{sanitized_speaker}_{file_counter:04d}"
+
+                speaker_output_dir = Path(output_base_dir) / episode_name / sanitized_speaker
+                speaker_output_dir.mkdir(parents=True, exist_ok=True)
+
+                final_flac_path = speaker_output_dir / f"{base_filename}.flac"
+                final_txt_path = speaker_output_dir / f"{base_filename}.txt"
+
+                sf.write(str(final_flac_path), final_audio_chunk, original_samplerate, subtype=original_subtype)
+                with open(final_txt_path, 'w', encoding='utf-8') as f_txt:
+                    f_txt.write(transcript)
+
+                ep_processed += 1
+
+            except (ValueError, KeyError) as e:
+                 # print(f"Warning: Skipping segment {index} (Speaker: {speaker}) due to data error: {e}")
+                 ep_skipped += 1
+            except Exception as e_inner:
+                 print(f"Error processing segment {index} (Speaker: {speaker}): {e_inner}")
+                 ep_skipped += 1
+            finally:
+                 # Cleanup Temporary Files
+                 for tmp_path in [temp_wav_path, temp_txt_path]:
+                     if tmp_path and os.path.exists(tmp_path):
+                          try: os.remove(tmp_path)
+                          except Exception: pass
+
+        print(f"  Finished episode {episode_name}. Processed: {ep_processed}, Skipped (Errors/Missing): {ep_skipped}, Filtered (Duration): {ep_filtered_duration}, Filtered (Transcript): {ep_filtered_transcript}")
+        total_processed_segments += ep_processed
+        # Accumulate total skipped/filtered counts
+        total_skipped_segments += ep_skipped + ep_filtered_duration + ep_filtered_transcript
 
 
-    # ... (Final print summary remains the same) ...
-    print(f"\nProcessing complete.")
-    print(f"Successfully processed and saved: {processed_count} files.")
-    print(f"Skipped files (missing transcript, empty audio/transcript, alignment errors, etc.): {skipped_count}")
+    print("-" * 30)
+    print("\nBatch processing complete.")
+    print(f"Total segments processed and saved: {total_processed_segments}")
+    print(f"Total segments skipped/filtered : {total_skipped_segments}")
 
 
 if __name__ == "__main__":
     # --- Configuration ---
-    # Directory with the input audio segments (SHOULD have Speaker/wav structure)
-    INPUT_AUDIO_DIR = 'temp/segmented_vocals_e10_padded'
-    # Directory with the corresponding transcript files (SHOULD have Speaker/txt structure)
-    INPUT_TXT_DIR = 'temp/segmented_vocals_e10_padded'
-    # Directory where the final clipped audio segments will be saved
-    OUTPUT_CLIPPED_AUDIO_DIR = 'temp/segmented_vocals_e10_final2'
+    INPUT_JSON_DIR = "/home/taresh/Downloads/anime/audios/Dandadan/gemini_outputs5_1ch_t0.5"
+    ORIGINAL_AUDIO_DIR = "/home/taresh/Downloads/anime/audios/Dandadan/vocals_normalized"
+    OUTPUT_BASE_DIR = "/home/taresh/Downloads/anime/audios/Dandadan/final_aligned_clips_filtered" # New output dir
 
-    # Aligner configuration
-    ALIGNER_MODEL = "MahmoudAshraf/mms-300m-1130-forced-aligner" # Or your preferred model
-    LANGUAGE = 'en' # Set your language code
-    USE_GPU = True  # Set to False to force CPU
+    TARGET_SPEAKERS = ["Momo Ayase"]
+
+    PADDING_SECONDS = 1
+    MIN_DURATION_SECONDS = 0.4 # Filter segments shorter than 0.5 seconds
+    MIN_WORDS_IN_TRANSCRIPT = 1 # Filter segments with 0 or 1 word
+
+    ALIGNER_MODEL = "MahmoudAshraf/mms-300m-1130-forced-aligner"
+    LANGUAGE = 'en'
+    USE_GPU = True
 
     # --- Basic Path Checks ---
-    paths_ok = True
-    if not os.path.isdir(INPUT_AUDIO_DIR):
-         print(f"ERROR: Input audio directory not found: {INPUT_AUDIO_DIR}")
-         paths_ok = False
-    if not os.path.isdir(INPUT_TXT_DIR):
-         print(f"ERROR: Input text directory not found: {INPUT_TXT_DIR}")
-         paths_ok = False
-
-    # --- Run ---
-    if paths_ok:
-        try:
-            process_directory(
-                input_audio_dir=INPUT_AUDIO_DIR,
-                input_txt_dir=INPUT_TXT_DIR,
-                output_audio_dir=OUTPUT_CLIPPED_AUDIO_DIR,
-                aligner_model_name=ALIGNER_MODEL,
-                language=LANGUAGE,
-                use_gpu=USE_GPU
-            )
-        except ImportError:
-             pass # Exit handled earlier
-        except Exception as main_e:
-             print(f"\nAn unexpected error occurred during script execution: {main_e}")
+    if not os.path.isdir(INPUT_JSON_DIR) or not os.path.isdir(ORIGINAL_AUDIO_DIR):
+        print(f"ERROR: Input JSON directory ('{INPUT_JSON_DIR}') or Original Audio directory ('{ORIGINAL_AUDIO_DIR}') not found.")
+    elif not TARGET_SPEAKERS:
+        print(f"ERROR: TARGET_SPEAKERS list cannot be empty.")
+    else:
+        process_episodes(
+            input_json_dir=INPUT_JSON_DIR,
+            original_audio_dir=ORIGINAL_AUDIO_DIR,
+            output_base_dir=OUTPUT_BASE_DIR,
+            target_speakers=TARGET_SPEAKERS,
+            aligner_model_name=ALIGNER_MODEL,
+            language=LANGUAGE,
+            padding_seconds=PADDING_SECONDS,
+            use_gpu=USE_GPU,
+            min_duration_seconds=MIN_DURATION_SECONDS, # Pass new args
+            min_words_in_transcript=MIN_WORDS_IN_TRANSCRIPT # Pass new args
+        )
