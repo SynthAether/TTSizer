@@ -10,20 +10,31 @@ from tqdm.auto import tqdm
 from typing import Optional, Literal, List
 import torch.nn as nn
 from ml_collections import ConfigDict
+from pathlib import Path
 
 from models.bs_roformer import MelBandRoformer
-from utils import demix 
+from utils import demix
 
 import warnings
 warnings.filterwarnings("ignore")
 
+SKIP_IF_OUTPUT_EXISTS = True 
+
+# Model settings
 SAMPLING_RATE = 44100
+MODEL_PATH = "weights/kimmel_unwa_ft2_bleedless.ckpt"
+CONFIG_PATH = "configs/config_kimmel_unwa_ft.yaml"
+OUTPUT_FORMAT = 'flac'
+OUTPUT_PCM_TYPE = 'PCM_24'
+MODEL_TYPE = 'mel_band_roformer'
+
 
 class VocalSeparator:
     """
     A class to perform vocal separation on audio files (WAV or FLAC) within
     a folder using a pre-trained MelBandRoformer model.
     Supports single or multi-GPU processing. Outputs separated vocals losslessly.
+    Can skip processing if output file already exists.
     """
     def __init__(self,
                  model_path: str,
@@ -43,7 +54,8 @@ class VocalSeparator:
 
         self.model_path = model_path
         self.config_path = config_path
-        self.output_dir = output_dir
+        self.base_output_dir = Path(output_dir)
+        self.output_dir = self.base_output_dir
         self.model_type = model_type
         self.use_gpu = use_gpu
         self.gpu_ids = gpu_ids
@@ -56,8 +68,7 @@ class VocalSeparator:
         self._load_config_and_model()
         self._setup_device()
 
-        os.makedirs(self.output_dir, exist_ok=True)
-        print(f"Output directory set to: {self.output_dir}")
+        print(f"Base output directory structure will be relative to: {self.base_output_dir}")
         print(f"Output format: {self.output_format.upper()} ({self.output_pcm_type})")
         print("Initialization complete.")
 
@@ -88,7 +99,6 @@ class VocalSeparator:
         """Sets up the computation device (CPU or specific GPU(s))."""
         if self.use_gpu and torch.cuda.is_available():
             num_gpus = torch.cuda.device_count()
-            # Validate provided GPU IDs
             valid_ids = [i for i in self.gpu_ids if i >= 0 and i < num_gpus]
             if not valid_ids:
                 print(f"Warning: Provided GPU IDs {self.gpu_ids} are invalid or unavailable (found {num_gpus} GPUs). Falling back to CPU.")
@@ -99,13 +109,11 @@ class VocalSeparator:
                 self.model = self.model.to(self.device)
                 print(f"Using specified single GPU: cuda:{valid_ids[0]}")
             else:
-                self.device = torch.device(f'cuda:{valid_ids[0]}') # Primary device
-                # Important: Wrap model *before* moving it if DataParallel handles placement
+                self.device = torch.device(f'cuda:{valid_ids[0]}') 
                 self.model = nn.DataParallel(self.model, device_ids=valid_ids) 
-                self.model.to(self.device) # Move the wrapped model
+                self.model.to(self.device) 
                 print(f"Using {len(valid_ids)} GPUs with DataParallel: {valid_ids}")
         else:
-            # Use CPU
             self.device = torch.device('cpu')
             self.model = self.model.to(self.device)
             if self.use_gpu:
@@ -122,38 +130,38 @@ class VocalSeparator:
         required_channels = self.config.audio.get('num_channels', 1) 
         
         if mix.shape[0] == 1 and required_channels == 2:
-            print("Input audio is mono, but model configuration expects stereo. Duplicating channel.")
+            tqdm.write("  Input audio is mono, but model configuration expects stereo. Duplicating channel.")
             mix = np.concatenate([mix, mix], axis=0) 
         elif mix.shape[0] > 2:
-             print(f"Warning: Input audio has {mix.shape[0]} channels. Taking only the first two.")
+             tqdm.write(f"  Warning: Input audio has {mix.shape[0]} channels. Taking only the first two.")
              mix = mix[:2, :] 
-
         return mix
 
 
     def _process_file(self, file_path: str):
-        """Loads, processes, and saves the vocals for a single audio file."""
-        print(f"\nProcessing: {os.path.basename(file_path)}")
+        """Loads, processes, and saves the vocals for a single audio file.
+        Assumes self.output_dir is set correctly for the current batch.
+        Prints messages using tqdm.write.
+        """
+        audio_file_path_obj = Path(file_path)
+        tqdm.write(f"\nProcessing: {audio_file_path_obj.name}") # \n for visual separation in log
         
         target_sr = self.config.audio.get('sample_rate', SAMPLING_RATE)
 
         try:
             mix_orig, sr_orig = librosa.load(file_path, sr=None, mono=False)
 
-            # Resample if needed AFTER loading
             if sr_orig != target_sr:
-                print(f"  Resampling from {sr_orig} Hz to {target_sr} Hz...")
-                # Ensure mix_orig is 2D before resampling multichannel
+                tqdm.write(f"  Resampling from {sr_orig} Hz to {target_sr} Hz...")
                 if mix_orig.ndim == 1:
                     mix_orig = np.expand_dims(mix_orig, axis=0)
                 mix = librosa.resample(mix_orig, orig_sr=sr_orig, target_sr=target_sr, res_type='kaiser_best')
-                print(f"  Done resampling")
+                tqdm.write(f"  Done resampling")
             else:
                 mix = mix_orig 
-
         except Exception as e:
-            print(f'--> ERROR: Cannot read track: {os.path.basename(file_path)}')
-            print(f'     Error message: {str(e)}')
+            tqdm.write(f'--> ERROR: Cannot read track: {audio_file_path_obj.name}')
+            tqdm.write(f'     Error message: {str(e)}')
             return 
         
         mix = self._prepare_audio(mix)
@@ -161,14 +169,12 @@ class VocalSeparator:
         try:
             mix_tensor = torch.tensor(mix, dtype=torch.float32).to(self.device)
             
-            # Use torch.no_grad() for inference efficiency
             with torch.no_grad():
                  waveforms_dict = demix(self.config, self.model, mix_tensor, self.device, 
-                                        model_type=self.model_type, pbar=True) # Disable inner progress bar if tqdm used outside
-
+                                        model_type=self.model_type, pbar=False) # Disable inner progress bar
         except Exception as e:
-            print(f"--> ERROR: Failed to demix track: {os.path.basename(file_path)}")
-            print(f"     Error message: {str(e)}")
+            tqdm.write(f"--> ERROR: Failed to demix track: {audio_file_path_obj.name}")
+            tqdm.write(f"     Error message: {str(e)}")
             return 
         
         instruments = self.config.training.get('instruments', [])
@@ -179,27 +185,28 @@ class VocalSeparator:
             vocal_key = target_instrument
         elif 'vocals' in waveforms_dict:
             vocal_key = 'vocals'
-        elif instruments and 'vocals' in instruments and 'vocals' in waveforms_dict:
+        elif instruments and 'vocals' in instruments and 'vocals' in waveforms_dict: # Check if 'vocals' is a listed instrument
              vocal_key = 'vocals' 
 
         if not vocal_key:
-            print(f"--> WARNING: Could not find 'vocals' or specified target instrument "
-                  f"('{target_instrument}') in separated stems for {os.path.basename(file_path)}. Skipping save.")
-            print(f"    Available stems: {list(waveforms_dict.keys())}")
+            tqdm.write(f"--> WARNING: Could not find 'vocals' or specified target instrument "
+                  f"('{target_instrument}') in separated stems for {audio_file_path_obj.name}. Skipping save.")
+            tqdm.write(f"    Available stems: {list(waveforms_dict.keys())}")
             return
 
         estimates_numpy = waveforms_dict[vocal_key]
 
-        file_name_base = os.path.splitext(os.path.basename(file_path))[0]
+        file_name_base = audio_file_path_obj.stem
         output_filename = f"{file_name_base}_vocals.{self.output_format}"
-        output_path = os.path.join(self.output_dir, output_filename)
+        output_path = self.output_dir / output_filename
+
 
         subtype = self.output_pcm_type
         if self.output_format == 'wav' and subtype not in ['PCM_16', 'PCM_24', 'FLOAT']:
-             print(f"Warning: Invalid pcm_type '{subtype}' for WAV output. Defaulting to 'FLOAT'.")
+             tqdm.write(f"Warning: Invalid pcm_type '{subtype}' for WAV output. Defaulting to 'FLOAT'.")
              subtype = 'FLOAT'
         elif self.output_format == 'flac' and subtype not in ['PCM_16', 'PCM_24']:
-             print(f"Warning: Invalid pcm_type '{subtype}' for FLAC output. Defaulting to 'PCM_16'.")
+             tqdm.write(f"Warning: Invalid pcm_type '{subtype}' for FLAC output. Defaulting to 'PCM_16'.")
              subtype = 'PCM_16' 
 
         try:
@@ -208,69 +215,144 @@ class VocalSeparator:
             else: 
                  data_to_write = estimates_numpy.T 
             
-            sf.write(output_path, data_to_write, target_sr, subtype=subtype)
-            print(f"--> Saved vocals to: {output_filename}")
+            sf.write(str(output_path), data_to_write, target_sr, subtype=subtype)
+            tqdm.write(f"--> Saved vocals to: {output_filename} in {self.output_dir.name}")
         except Exception as e:
-            print(f"--> ERROR: Failed to write output file: {output_filename}")
-            print(f"     Error message: {str(e)}")
+            tqdm.write(f"--> ERROR: Failed to write output file: {output_filename}")
+            tqdm.write(f"     Error message: {str(e)}")
 
 
-    def process_folder(self, input_folder: str, verbose: bool = False):
+    def process_folder(self, input_folder: str, verbose: bool = False): # verbose not actively used yet
         """
         Processes all compatible audio files in the specified input folder.
-
-        Args:
-            input_folder: Path to the folder containing audio files (.wav).
-            verbose: If True, prints more detailed logs.
+        Skips files if SKIP_IF_OUTPUT_EXISTS is True and output already exists.
+        self.output_dir must be set to the correct output path for this folder *before* calling.
         """
-        if not os.path.isdir(input_folder):
-             print(f"Error: Input folder not found or is not a directory: {input_folder}")
+        input_folder_path = Path(input_folder)
+        if not input_folder_path.is_dir():
+             tqdm.write(f"Error: Input folder not found or is not a directory: {input_folder_path}")
              return
 
-        start_time = time.time()
-        print(f"\nStarting processing for folder: {input_folder}")
+        start_time_folder = time.time()
+        tqdm.write(f"\n--- Starting processing for folder: {input_folder_path.name} ---")
+        tqdm.write(f"Input: {input_folder_path}")
+        tqdm.write(f"Output: {self.output_dir}")
         
-        all_mixtures_path = glob.glob(os.path.join(input_folder, '*.flac')) 
-        total_tracks = len(all_mixtures_path)
+        if SKIP_IF_OUTPUT_EXISTS:
+            tqdm.write("SKIP_IF_OUTPUT_EXISTS is True. Will skip files with existing outputs.")
+        else:
+            tqdm.write("SKIP_IF_OUTPUT_EXISTS is False. Will process all files.")
+        
+        all_mixtures_path_strs = glob.glob(os.path.join(str(input_folder_path), '*.flac'))
+        all_mixtures_paths = [Path(p) for p in all_mixtures_path_strs]
+        
+        total_tracks = len(all_mixtures_paths)
 
         if total_tracks == 0:
-            print("No .flac files found in the input folder.")
+            tqdm.write("No .flac files found in the input folder.")
+            tqdm.write(f"--- Finished processing folder: {input_folder_path.name} ---")
             return
             
-        print(f"Found {total_tracks} '.flac' tracks to process.")
+        tqdm.write(f"Found {total_tracks} '.flac' tracks to process in {input_folder_path.name}.")
 
-        # Use tqdm for overall progress
-        for file_path in tqdm(all_mixtures_path, desc="Processing audio files"):
-            self._process_file(file_path)
+        skipped_count = 0
+        attempted_processing_count = 0
 
-        print(f"\nFolder processing finished. Elapsed time: {time.time() - start_time:.2f} seconds.")
+        for audio_file_path in tqdm(all_mixtures_paths, desc=f"Folder: {input_folder_path.name}", unit="file", leave=False):
+            file_name_base = audio_file_path.stem
+            expected_output_filename = f"{file_name_base}_vocals.{self.output_format}"
+            # self.output_dir is the specific output directory for the current folder being processed
+            expected_output_path = self.output_dir / expected_output_filename
+
+            if SKIP_IF_OUTPUT_EXISTS and expected_output_path.exists():
+                tqdm.write(f"--> SKIPPING (output exists): {expected_output_filename} in {self.output_dir.name}")
+                skipped_count += 1
+                continue
+            
+            attempted_processing_count += 1
+            self._process_file(str(audio_file_path)) # _process_file now uses tqdm.write for its logs
+
+        elapsed_time_folder = time.time() - start_time_folder
+        tqdm.write(f"\n--- Folder '{input_folder_path.name}' processing summary ---")
+        tqdm.write(f"  Elapsed time: {elapsed_time_folder:.2f} seconds.")
+        tqdm.write(f"  Total .flac files found: {total_tracks}")
+        tqdm.write(f"  Files skipped (output already existed): {skipped_count}")
+        tqdm.write(f"  Files for which processing was attempted: {attempted_processing_count}")
+        tqdm.write(f"--- Finished processing folder: {input_folder_path.name} ---")
+
+
+def process_batch_directories():
+    BASE_INPUT_DIR = Path("/home/taresh/Downloads/anime/audios")
+    BASE_OUTPUT_DIR = Path("/home/taresh/Downloads/anime/audios")
+
+    SUBFOLDER_NAMES_TO_PROCESS: list[str] = [
+        # "fate_1", 
+        # "fate_2", 
+        "konosuba_preq", "Madoka_Magica", "sao_1", 
+        "Rezero_s1", "Rezero_s2", "Rezero_s3p1", "Rezero_s3p2", 
+        "sao_2"
+    ]
+
+    USE_GPU = True
+    GPU_IDS = [0]
+
+    print("--- Batch Processing Configuration ---")
+    print(f"SKIP_IF_OUTPUT_EXISTS: {SKIP_IF_OUTPUT_EXISTS}")
+    print(f"Base Input Directory: {BASE_INPUT_DIR}")
+    print(f"Base Output Directory: {BASE_OUTPUT_DIR}")
+    print(f"Subfolders to Process: {SUBFOLDER_NAMES_TO_PROCESS}")
+    print(f"Using GPU: {USE_GPU}, IDs: {GPU_IDS if USE_GPU else 'N/A'}")
+    print("-" * 40)
+
+    processed_folders_count = 0
+    skipped_folders_count = 0
+
+    try:
+        separator = VocalSeparator(
+            model_path=MODEL_PATH,
+            config_path=CONFIG_PATH,
+            output_dir=str(BASE_OUTPUT_DIR), # Placeholder, will be updated per folder
+            model_type=MODEL_TYPE,
+            use_gpu=USE_GPU,
+            gpu_ids=GPU_IDS,
+            output_format=OUTPUT_FORMAT,
+            output_pcm_type=OUTPUT_PCM_TYPE
+        )
+    except Exception as e:
+        print(f"❌ CRITICAL ERROR: Failed to initialize VocalSeparator: {e}")
+        print("Batch processing cannot continue.")
+        return
+
+    overall_start_time = time.time()
+
+    for subfolder_name in tqdm(SUBFOLDER_NAMES_TO_PROCESS, desc="Overall Batch Progress", unit="folder"):
+        current_input_folder = BASE_INPUT_DIR / subfolder_name / "orig"
+        current_output_folder_for_vocals = BASE_OUTPUT_DIR / subfolder_name / "vocals"
+
+        if not current_input_folder.is_dir():
+            tqdm.write(f"⚠️ WARNING: Input folder '{current_input_folder}' does not exist. Skipping subfolder '{subfolder_name}'.")
+            skipped_folders_count += 1
+            tqdm.write("-" * 30)
+            continue
+
+        current_output_folder_for_vocals.mkdir(parents=True, exist_ok=True)
+
+        separator.output_dir = current_output_folder_for_vocals
+
+        try:
+            separator.process_folder(str(current_input_folder))
+            processed_folders_count += 1
+        except Exception as e:
+            tqdm.write(f"❌ ERROR processing subfolder '{subfolder_name}' (Input: {current_input_folder}): {e}")
+
+    overall_elapsed_time = time.time() - overall_start_time
+    print("\n--- Overall Batch Processing Summary ---")
+    print(f"Total time for batch: {overall_elapsed_time:.2f} seconds.")
+    print(f"Subfolders for which processing was initiated: {processed_folders_count}")
+    print(f"Subfolders skipped (input directory not found): {skipped_folders_count}")
+    print(f"Total subfolders in list: {len(SUBFOLDER_NAMES_TO_PROCESS)}")
+    print("Batch processing completed!")
 
 
 if __name__ == "__main__":
-    # --- Configuration ---
-    MODEL_PATH = "weights/kimmel_unwa_ft2_bleedless.ckpt" 
-    CONFIG_PATH = "configs/config_kimmel_unwa_ft.yaml"
-    INPUT_FOLDER = "/home/taresh/Downloads/anime/audios/Frieren/orig"
-    OUTPUT_FOLDER = "/home/taresh/Downloads/anime/audios/Frieren/vocals"
-    
-    USE_GPU = True 
-    GPU_IDS = [0]
-                   
-    OUTPUT_FORMAT = 'flac' 
-    OUTPUT_PCM_TYPE = 'PCM_24'
-    MODEL_TYPE = 'mel_band_roformer' 
-
-    separator = VocalSeparator(
-        model_path=MODEL_PATH,
-        config_path=CONFIG_PATH,
-        output_dir=OUTPUT_FOLDER,
-        model_type=MODEL_TYPE,
-        use_gpu=USE_GPU,
-        gpu_ids=GPU_IDS,
-        output_format=OUTPUT_FORMAT,
-        output_pcm_type=OUTPUT_PCM_TYPE
-    )
-
-    separator.process_folder(INPUT_FOLDER)
-
-    print("\nProcessing completed successfully!")
+    process_batch_directories()

@@ -10,9 +10,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 MODEL = "gemini-2.5-pro-exp-03-25"
+# MODEL = "gemini-2.5-pro-preview-05-06"
 TEMPERATURE = 0.1
 TOP_P = 0.8
 PROMPT_TEMPLATE_PATH = Path('prompt_template.txt')
+skip_patterns=[]
+
+SKIP_ALREADY_PROCESSED = True 
 
 def build_context_and_prompt(anime_title: str, characters_of_interest: List[str]) -> str:
     """
@@ -71,7 +75,7 @@ def generate_on_file(flac_path: Path, output_json: Path, base_prompt: str):
         contents=contents,
         config=config,
     )
-    json_text = response.candidates[0].content.parts[0].model_dump()["text"]
+    json_text = response.candidates[0].content.parts[0].text
     data = json.loads(json_text)
 
     output_json.write_text(json.dumps(data, indent=4, ensure_ascii=False), encoding='utf-8')
@@ -80,22 +84,54 @@ def generate_on_file(flac_path: Path, output_json: Path, base_prompt: str):
 def batch_generate(anime_title: str, characters_of_interest: List[str], input_dir: Path, output_dir: Path):
     """
     Process all .flac files in input_dir and write corresponding JSON in output_dir.
+    Skips files if their corresponding JSON output already exists and SKIP_ALREADY_PROCESSED is True.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     base_prompt = build_context_and_prompt(anime_title, characters_of_interest)
+    print("Using Base Prompt:")
     print(base_prompt)
+    print("-" * 30)
+    if SKIP_ALREADY_PROCESSED:
+        print("SKIP_ALREADY_PROCESSED is True. Will skip files with existing JSON outputs.")
+    else:
+        print("SKIP_ALREADY_PROCESSED is False. Will process all files.")
+    print("-" * 30)
+
 
     flac_files = sorted(input_dir.glob("*.flac"))
     if not flac_files:
         print(f"No .flac files found in {input_dir}")
         return
 
-    for fl in tqdm(flac_files):
+    processed_count = 0
+    skipped_count = 0
+
+    for fl in tqdm(flac_files, desc="Processing audio files"):
+        if any(pattern in fl.name for pattern in skip_patterns):
+            tqdm.write(f"Skipping {fl.name} due to skip_patterns.")
+            skipped_count += 1
+            continue
+
         out_json = output_dir / (fl.stem + ".json")
+
+        if SKIP_ALREADY_PROCESSED and out_json.exists():
+            tqdm.write(f"Skipping {fl.name} as output {out_json.name} already exists.")
+            skipped_count += 1
+            continue
+
         try:
+            tqdm.write(f"Processing {fl.name}...")
             generate_on_file(fl, out_json, base_prompt)
+            processed_count += 1
         except Exception as e:
-            print(f"Error processing {fl.name}: {e}")
+            tqdm.write(f"Error processing {fl.name}: {e}")
+
+    print("-" * 30)
+    print("Batch processing complete.")
+    print(f"Successfully processed: {processed_count} files.")
+    print(f"Skipped (already existing or pattern match): {skipped_count} files.")
+    print(f"Total .flac files found: {len(flac_files)} files.")
+
 
 if __name__ == "__main__":
     anime_title = "Dandadan"
