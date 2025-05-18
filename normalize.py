@@ -1,250 +1,265 @@
 import json
 import subprocess
 from pathlib import Path
-from multiprocessing import Pool, cpu_count # For multiprocessing
+from multiprocessing import Pool, cpu_count
+from typing import Dict, Any, Optional, List, Tuple
+import yaml # For loading config in __main__
+import os # For os.chdir in __main__
+from tqdm import tqdm # For progress bar
 
-NUM_PROCESSES: int | None = 6 
-FFMPEG_TIMEOUT_SECONDS = 600
+class AudioNormalizer:
+    """Normalizes audio files to target loudness and true peak levels."""
+    def __init__(self, config: Dict[str, Any]):
+        self.target_lufs: float = config["target_lufs"]
+        self.target_tp: float = config["target_tp"]
+        self.sample_rate: int = config["sample_rate"]
+        self.output_codec: str = config.get("output_codec", "flac") # Default to flac if not specified
+        self.ffmpeg_timeout: int = config["ffmpeg_timeout_seconds"]
+        self.num_processes: Optional[int] = config.get("num_processes")
+        self.skip_if_output_exists: bool = config.get("skip_if_output_exists", True)
+        # tqdm.write is used for logging from worker processes
 
-TARGET_LUFS = -20.0    # Integrated loudness target in LUFS (moderate for speech)
-TARGET_TP = -1.5        # True-peak target in dBTP
-SAMPLE_RATE = 44100
+    def _run_ffmpeg_command(self, cmd: List[str], file_name_for_log: str) -> subprocess.CompletedProcess:
+        try:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False, # Will check returncode manually
+                timeout=self.ffmpeg_timeout
+            )
+        except subprocess.TimeoutExpired as e:
+            # Extract last few lines of stderr if available
+            stderr_tail = ""
+            if e.stderr:
+                try:
+                    stderr_lines = e.stderr.decode(errors='replace').strip().splitlines()
+                    stderr_tail = "\n".join(stderr_lines[-5:]) # Last 5 lines
+                except Exception:
+                    stderr_tail = "Could not decode stderr."
 
-def run_ffmpeg_command(cmd: list) -> subprocess.CompletedProcess:
-    """
-    Run an ffmpeg command via subprocess and return the CompletedProcess.
-    Raises CalledProcessError on failure or TimeoutError on timeout.
-    """
-    try:
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False, 
-            timeout=FFMPEG_TIMEOUT_SECONDS
+            error_message = (f"FFmpeg timeout for {file_name_for_log} after {self.ffmpeg_timeout}s. "
+                             f"Command: '{' '.join(cmd)}'. Stderr (tail): {stderr_tail}")
+            raise TimeoutError(error_message) from e
+
+        if result.returncode != 0:
+            # Extract last few lines of stderr for CalledProcessError as well
+            stderr_tail = ""
+            if result.stderr:
+                stderr_lines = result.stderr.strip().splitlines()
+                stderr_tail = "\n".join(stderr_lines[-5:])
+            
+            # Create a new CalledProcessError with a more informative message including the stderr tail
+            # Note: We are not re-raising result.check_returncode() as it might not include stderr directly
+            # in its formatted message in all Python versions in the way we want.
+            raise subprocess.CalledProcessError(
+                result.returncode, cmd, output=result.stdout, stderr=result.stderr,
+            )
+        return result
+
+    def _measure_loudness(self, input_path: Path) -> Dict[str, Any]:
+        filter_str = f"loudnorm=I={self.target_lufs}:TP={self.target_tp}:print_format=json"
+        cmd = [
+            "ffmpeg", "-hide_banner", "-nostats", "-i", str(input_path),
+            "-af", filter_str,
+            "-f", "null", "-"
+        ]
+        # tqdm.write(f"[{input_path.name}] Measuring loudness...") # Less verbose for workers
+        completed = self._run_ffmpeg_command(cmd, input_path.name)
+        stderr = completed.stderr
+        start = stderr.rfind('{')
+        end = stderr.rfind('}') + 1 # Look for last brace
+        if start == -1 or end == 0 or end <= start:
+            raise ValueError(f"Could not find valid JSON in ffmpeg output for {input_path.name}. Stderr: {stderr[-500:]}")
+        
+        json_str = stderr[start:end]
+        try:
+            stats = json.loads(json_str)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Failed to parse JSON from ffmpeg for {input_path.name}. Error: {e}. JSON: '{json_str}'. Stderr: {stderr[-500:]}")
+        return stats
+
+    def _normalize_and_convert(self, input_path: Path, stats: Dict[str, Any], output_path: Path):
+        measured_I = stats['input_i']
+        measured_LRA = stats['input_lra']
+        measured_TP = stats['input_tp']
+        measured_thresh = stats['input_thresh']
+        offset = stats.get('target_offset', 0.0) # Ensure offset is correctly parsed as float
+
+        loudnorm_filter = (
+            f"loudnorm=I={self.target_lufs}:LRA={measured_LRA}:TP={self.target_tp}:"
+            f"measured_I={measured_I}:measured_LRA={measured_LRA}:measured_TP={measured_TP}:"
+            f"measured_thresh={measured_thresh}:offset={float(offset)}:linear=true:print_format=summary"
         )
-    except subprocess.TimeoutExpired as e:
-        error_message = f"ffmpeg command timed out after {FFMPEG_TIMEOUT_SECONDS}s.\n"
-        error_message += f"Command: {' '.join(cmd)}\n"
-        stdout_str = e.stdout.decode(errors='replace') if isinstance(e.stdout, bytes) else str(e.stdout or "")
-        stderr_str = e.stderr.decode(errors='replace') if isinstance(e.stderr, bytes) else str(e.stderr or "")
-        if stdout_str: error_message += f"Stdout: {stdout_str.strip()}\n"
-        if stderr_str: error_message += f"Stderr: {stderr_str.strip()}\n"
-        raise TimeoutError(error_message.strip()) from e
+        cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-nostats", "-i", str(input_path),
+            "-af", loudnorm_filter,
+            "-ac", "1", # Mono output
+            "-ar", str(self.sample_rate),
+            "-c:a", self.output_codec, # e.g. flac
+            str(output_path)
+        ]
+        # tqdm.write(f"[{input_path.name}] Normalizing to {output_path.name}...") # Less verbose for workers
+        self._run_ffmpeg_command(cmd, input_path.name)
 
-    if result.returncode != 0:
-        result.check_returncode()
-    return result
+    def _process_single_file_worker(self, input_path: Path, output_path: Path) -> Tuple[Path, Optional[str]]:
+        # Renamed from process_single_file to avoid conflict if orchestrator calls this module directly
+        # This is the function that will be mapped by multiprocessing.Pool
+        if self.skip_if_output_exists and output_path.exists():
+            # tqdm.write(f"Skipping {input_path.name} as output {output_path.name} already exists.")
+            return input_path, "skipped_exists"
+        try:
+            stats = self._measure_loudness(input_path)
+            self._normalize_and_convert(input_path, stats, output_path)
+            # tqdm.write(f"[{input_path.name}] Successfully processed.") # Worker should not print success, main loop will
+            return input_path, None # Success
+        except (subprocess.CalledProcessError, TimeoutError, ValueError) as e:
+            # For CalledProcessError, include stderr if available
+            err_msg = str(e)
+            if isinstance(e, subprocess.CalledProcessError) and e.stderr:
+                stderr_lines = e.stderr.strip().splitlines()
+                stderr_tail = "\n".join(stderr_lines[-5:]) # Last 5 lines of stderr
+                err_msg = f"{type(e).__name__} for '{input_path.name}'. Stderr (tail): {stderr_tail}. Command: '{' '.join(e.cmd)}'"
+            elif isinstance(e, TimeoutError):
+                 err_msg = f"Timeout for '{input_path.name}'. {e}"
+            else: # ValueError
+                err_msg = f"{type(e).__name__} for '{input_path.name}'. {e}"
 
-def measure_loudness(input_path: Path) -> dict:
-    """
-    First pass: measure loudness and dynamic range with ffmpeg loudnorm filter, return JSON stats.
-    """
-    filter_str = f"loudnorm=I={TARGET_LUFS}:TP={TARGET_TP}:print_format=json"
-    cmd = [
-        "ffmpeg", "-hide_banner", "-nostats", "-i", str(input_path),
-        "-af", filter_str,
-        "-f", "null", "-"
-    ]
-    print(f"[{input_path.name}] Measuring loudness...")
-    completed = run_ffmpeg_command(cmd)
+            # tqdm.write(f"[{input_path.name}] Error: {err_msg.splitlines()[0]}...") # Log from worker
+            return input_path, err_msg # Failure, return error message
+        except Exception as e: # Catch any other unexpected errors
+            # tqdm.write(f"[{input_path.name}] Unexpected error: {type(e).__name__}: {e}")
+            return input_path, f"Unexpected error for '{input_path.name}': {type(e).__name__}: {e}"
 
-    stderr = completed.stderr
-    start = stderr.rfind('{')
-    if start == -1:
-        raise ValueError(f"Could not find JSON start '{{' in ffmpeg output for {input_path.name}:\nStderr: {stderr}")
-    
-    end = stderr.find('}', start) + 1
-    if end == 0:
-        raise ValueError(f"Could not find JSON end '}}' in ffmpeg output for {input_path.name}:\nStderr: {stderr}")
+
+    def run_normalization_for_project(self, project_input_dir: Path, project_output_dir: Path):
+        project_output_dir.mkdir(parents=True, exist_ok=True)
         
-    json_str = stderr[start:end]
-    try:
-        stats = json.loads(json_str)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Failed to parse JSON from ffmpeg output for {input_path.name}:\nError: {e}\nJSON string attempt: '{json_str}'\nFull stderr:\n{stderr}")
-    return stats
+        tqdm.write(f"\nAudioNormalizer: Processing audio from {project_input_dir.resolve()}")
+        tqdm.write(f"AudioNormalizer: Outputting normalized audio to {project_output_dir.resolve()}")
+        if self.skip_if_output_exists:
+            tqdm.write("AudioNormalizer: Will skip files if output already exists.")
 
-def normalize_and_convert(input_path: Path, stats: dict, output_folder: Path) -> None:
-    """
-    Second pass: apply loudness normalization and convert to mono, preserving natural dynamics.
-    Output as FLAC (lossless) to avoid any quality degradation.
-    """
-    measured_I      = stats['input_i']
-    measured_LRA    = stats['input_lra']
-    measured_TP     = stats['input_tp']
-    measured_thresh = stats['input_thresh']
-    offset          = stats.get('target_offset', 0.0)
+        # Glob for common audio file types, can be made configurable
+        audio_extensions = ["*.flac", "*.wav", "*.mp3", "*.aac", "*.m4a"]
+        files_to_process = []
+        for ext in audio_extensions:
+            files_to_process.extend(list(project_input_dir.rglob(ext)))
+        files_to_process = sorted(list(set(files_to_process))) # Remove duplicates and sort
 
-    loudnorm_filter = (
-        f"loudnorm=I={TARGET_LUFS}:LRA={measured_LRA}:TP={TARGET_TP}:"
-        f"measured_I={measured_I}:measured_LRA={measured_LRA}:measured_TP={measured_TP}:"
-        f"measured_thresh={measured_thresh}:offset={offset}:linear=true:print_format=summary"
-    )
+        if not files_to_process:
+            tqdm.write(f"AudioNormalizer: No compatible audio files found in {project_input_dir}")
+            return
 
-    output_path = output_folder / input_path.with_suffix('.flac').name
+        tasks = []
+        for input_file_path in files_to_process:
+            # Determine output path, maintaining relative structure if input is from subdirs
+            relative_path = input_file_path.relative_to(project_input_dir)
+            output_file_path = project_output_dir / relative_path.with_suffix(f".{self.output_codec}")
+            output_file_path.parent.mkdir(parents=True, exist_ok=True) # Ensure subfolder exists
+            tasks.append((input_file_path, output_file_path))
 
-    cmd = [
-        "ffmpeg", "-y", "-hide_banner", "-nostats", "-i", str(input_path), # Added -y to overwrite
-        "-af", loudnorm_filter,
-        "-ac", "1",
-        "-ar", str(SAMPLE_RATE),
-        "-c:a", "flac",
-        str(output_path)
-    ]
-    print(f"[{input_path.name}] Normalizing & converting to {output_path.name}...")
-    run_ffmpeg_command(cmd)
+        workers = self.num_processes if self.num_processes is not None else cpu_count()
+        workers = max(1, min(workers, len(tasks))) # Ensure at least 1 worker, and not more than tasks
 
-
-def process_single_file(input_path: Path, output_folder: Path) -> tuple[Path, Exception | None]:
-    """
-    Worker function: processes a single FLAC file (measure loudness, then normalize).
-    Returns a tuple (input_path, None) on success, or (input_path, Exception) on failure.
-    """
-    try:
-        stats = measure_loudness(input_path)
-        normalize_and_convert(input_path, stats, output_folder)
-        print(f"[{input_path.name}] Successfully processed.")
-        return input_path, None
-    except subprocess.CalledProcessError as e:
-        error_detail = f"FFMPEG command failed for '{input_path.name}'.\n"
-        error_detail += f"Command: '{' '.join(e.cmd)}'. Return code: {e.returncode}.\n"
-        if e.stderr: error_detail += f"Stderr: {e.stderr.strip()}\n"
-        if e.stdout: error_detail += f"Stdout: {e.stdout.strip()}\n"
-        print(f"[{input_path.name}] Error: {error_detail.splitlines()[0]}...")
-        return input_path, Exception(error_detail.strip())
-    except TimeoutError as e:
-        print(f"[{input_path.name}] Error: {str(e).splitlines()[0]}...")
-        return input_path, e
-    except ValueError as e:
-        print(f"[{input_path.name}] Data processing error: {type(e).__name__}: {str(e).splitlines()[0]}...")
-        return input_path, e
-    except Exception as e:
-        print(f"[{input_path.name}] An unexpected error occurred: {type(e).__name__}: {str(e).splitlines()[0]}...")
-        return input_path, e
-
-def batch_process_single_directory(input_folder: Path, output_folder: Path, num_processes: int | None) -> tuple[int, list[tuple[Path, str]]]:
-    """
-    Process all FLAC files in a single input_folder using multiple processes.
-    Returns (number_successful, list_of_failed_items), where failed_items are (path, error_string).
-    """
-    effective_num_processes = num_processes
-    if effective_num_processes is None:
-        effective_num_processes = cpu_count()
-    effective_num_processes = max(1, effective_num_processes)
-
-    print(f"Processing directory: {input_folder.resolve()} -> {output_folder.resolve()}")
-
-    flac_files = sorted(list(input_folder.glob("*.flac")))
-    if not flac_files:
-        print(f"No .flac files found in {input_folder}")
-        return 0, []
-
-    output_folder.mkdir(parents=True, exist_ok=True)
-
-    tasks = [(fl, output_folder) for fl in flac_files]
-    
-    actual_num_processes = min(effective_num_processes, len(flac_files))
-    if actual_num_processes < effective_num_processes:
-        print(f"Using {actual_num_processes} processes (capped by number of files: {len(flac_files)}).")
-    else:
-        print(f"Using {actual_num_processes} processes (requested: {effective_num_processes}).")
-
-    successful_count = 0
-    failed_items: list[tuple[Path, str]] = []
-
-    with Pool(processes=actual_num_processes) as pool:
-        results = pool.starmap(process_single_file, tasks)
-
-    for file_path, error_obj in results:
-        if error_obj is None:
-            successful_count += 1
-        else:
-            failed_items.append((file_path, str(error_obj)))
-
-    print(f"\nFinished processing for directory {input_folder.name}.")
-    print(f"  Successfully processed: {successful_count} files.")
-    if failed_items:
-        print(f"  Failed to process {len(failed_items)} files:")
-        for f_path, err_msg in failed_items:
-            print(f"    - {f_path.name}: {err_msg.splitlines()[0]}")
-    return successful_count, failed_items
-
-def orchestrate_subfolder_processing(
-    base_input_dir: Path, 
-    base_output_dir: Path, 
-    subfolder_names: list[str], 
-    num_processes: int | None
-):
-    """
-    Processes FLAC files in specified subdirectories under base_input_dir,
-    saving results to corresponding subdirectories in base_output_dir.
-    This function orchestrates calls to batch_process_single_directory for each subfolder.
-    """
-    total_successfully_processed = 0
-    total_failed_count = 0
-    all_failed_details: list[tuple[str, Path, str]] = [] 
-    skipped_folders_count = 0
-
-    print(f"Starting batch processing for specified subfolders...")
-    print(f"Base Input Directory: {base_input_dir.resolve()}")
-    print(f"Base Output Directory: {base_output_dir.resolve()}")
-    print(f"Subfolders to process: {', '.join(subfolder_names)}")
-    if num_processes:
-        print(f"Requested number of processes: {num_processes} (FFMPEG timeout per file: {FFMPEG_TIMEOUT_SECONDS}s)")
-    else:
-        print(f"Requested number of processes: Auto (CPU cores) (FFMPEG timeout per file: {FFMPEG_TIMEOUT_SECONDS}s)")
-    print("-" * 50)
-
-    for subfolder_name in subfolder_names:
-        current_input_folder = base_input_dir / subfolder_name / "vocals"
-        current_output_folder = base_output_dir / subfolder_name / "vocals_normalized"
-
-        print(f"\n--- Processing subfolder: {subfolder_name} ---")
-
-        if not current_input_folder.is_dir():
-            print(f"⚠️ WARNING: Input folder '{current_input_folder.resolve()}' does not exist. Skipping.")
-            skipped_folders_count += 1
-            print("-" * 30)
-            continue
-
-        successful_count, failed_items = batch_process_single_directory(
-            current_input_folder, 
-            current_output_folder, 
-            num_processes
-        )
+        tqdm.write(f"AudioNormalizer: Found {len(tasks)} audio files. Starting normalization with {workers} workers...")
         
-        total_successfully_processed += successful_count
-        total_failed_count += len(failed_items)
-        for item_path, item_error_str in failed_items:
-            all_failed_details.append((subfolder_name, item_path, item_error_str))
-        
-        print("-" * 30)
+        successful_count = 0
+        skipped_count = 0
+        failed_items: List[Tuple[Path, str]] = []
 
-    print("\n--- Overall Batch Processing Summary ---")
-    if skipped_folders_count > 0:
-        print(f"Total subfolders skipped (not found): {skipped_folders_count}")
-    print(f"Total files successfully processed across all subfolders: {total_successfully_processed}")
-    print(f"Total files failed to process across all subfolders: {total_failed_count}")
-    if all_failed_details:
-        print("Details of failed files (first line of error shown, see logs above for full details):")
-        for sf_name, f_path, err_str in all_failed_details:
-            first_line_error = err_str.splitlines()[0] if err_str and err_str.strip() else "Unknown error"
-            print(f"  - In '{sf_name}/{f_path.name}': {first_line_error}")
-    print("Batch processing for all specified directories complete.")
+        with Pool(processes=workers) as pool:
+            # Using tqdm to wrap the pool.imap_unordered for progress bar
+            results_iterable = pool.starmap(self._process_single_file_worker, tasks)
+            for result in tqdm(results_iterable, total=len(tasks), desc=f"Normalizing Audio", unit="file"):
+                file_path, error_obj = result
+                if error_obj is None:
+                    successful_count += 1
+                elif error_obj == "skipped_exists":
+                    skipped_count +=1
+                else:
+                    failed_items.append((file_path, error_obj))
+                    # Error already logged by tqdm.write in the worker for immediate feedback
+
+        tqdm.write(f"\nAudioNormalizer: Finished for {project_input_dir.name}.")
+        tqdm.write(f"  Successfully processed: {successful_count} files.")
+        if skipped_count > 0:
+            tqdm.write(f"  Skipped (output existed): {skipped_count} files.")
+        if failed_items:
+            tqdm.write(f"  Failed to process {len(failed_items)} files (see logs above for details):")
+            # for f_path, err_msg in failed_items: # No need to re-print, already logged by worker
+            #     tqdm.write(f"    - {f_path.name}: {err_msg.splitlines()[0]}")
 
 
+# For standalone testing:
 if __name__ == '__main__':
-    BASE_INPUT_DIR = Path("/home/taresh/Downloads/anime/audios")
-    BASE_OUTPUT_DIR = Path("/home/taresh/Downloads/anime/audios")
-    SUBFOLDER_NAMES_TO_PROCESS = ["Rezero_s1", "Rezero_s2", "Rezero_s3p1", "Rezero_s3p2"]
+    from multiprocessing import freeze_support
+    freeze_support()
 
-    orchestrate_subfolder_processing(
-        base_input_dir=BASE_INPUT_DIR,
-        base_output_dir=BASE_OUTPUT_DIR,
-        subfolder_names=SUBFOLDER_NAMES_TO_PROCESS,
-        num_processes=NUM_PROCESSES
-    )
+    config_file = Path("config.yaml")
+    if not config_file.exists():
+        config_file = Path("../config.yaml")
     
-    print("All processing finished.")
+    if not config_file.exists():
+        print("ERROR: config.yaml not found for standalone test.")
+        exit(1)
+
+    try:
+        with open(config_file, 'r') as f:
+            cfg = yaml.safe_load(f)
+    except Exception as e:
+        print(f"ERROR: Could not load or parse {config_file.resolve()}: {e}")
+        exit(1)
+
+    project_root_for_test = config_file.parent.resolve()
+    if Path.cwd() != project_root_for_test:
+        print(f"Standalone test: Changing CWD to project root: {project_root_for_test}")
+        os.chdir(project_root_for_test)
+
+    project_setup = cfg.get("project_setup")
+    if not project_setup:
+        print("ERROR: 'project_setup' section not found in config.yaml.")
+        exit(1)
+
+    project_name = project_setup.get("project_name")
+    output_base_abs = Path(project_setup.get("output_base_dir"))
+    if not output_base_abs.is_absolute():
+        output_base_abs = (project_root_for_test / output_base_abs).resolve()
+    
+    processing_project_dir_abs = output_base_abs / project_name
+
+    # Input for normalization is the output of vocal removal (vocal_removal_config.output_stage_folder_name / 'vocals')
+    vocal_removal_cfg = cfg.get("vocal_removal_config", {})
+    vocal_removal_output_folder = vocal_removal_cfg.get("output_stage_folder_name", "02_vocals_removed_test")
+    input_audio_dir = processing_project_dir_abs / vocal_removal_output_folder / "vocals"
+
+    # Output for normalization (normalize_audio_config.output_stage_folder_name)
+    normalizer_stage_config = cfg.get("normalize_audio_config")
+    if not normalizer_stage_config:
+        print(f"ERROR: 'normalize_audio_config' not found in config.yaml.")
+        exit(1)
+    normalizer_output_folder = normalizer_stage_config.get("output_stage_folder_name", "03_vocals_normalized_STANDALONE_TEST")
+    output_normalized_dir = processing_project_dir_abs / normalizer_output_folder
+
+    if not input_audio_dir.is_dir():
+        print(f"ERROR: Test input audio directory not found: {input_audio_dir.resolve()}")
+        print(f"Ensure the output from a previous vocal removal test run exists (e.g., '{vocal_removal_output_folder}/vocals').")
+        exit(1)
+            
+    print(f"--- Running AudioNormalizer Standalone Test for project: {project_name} ---")
+    print(f"Input audio from: {input_audio_dir.resolve()}")
+    print(f"Output normalized to: {output_normalized_dir.resolve()}")
+
+    try:
+        normalizer = AudioNormalizer(config=normalizer_stage_config) # Pass only its own config block
+        normalizer.run_normalization_for_project(
+            project_input_dir=input_audio_dir,
+            project_output_dir=output_normalized_dir
+        )
+    except Exception as e_main:
+        print(f"ERROR: An unexpected error occurred during standalone AudioNormalizer test: {e_main}")
+        import traceback
+        traceback.print_exc()
+    
+    print(f"--- Standalone Test Finished. Check output in: {output_normalized_dir.resolve()} ---")

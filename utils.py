@@ -7,7 +7,6 @@ from tqdm.auto import tqdm
 from typing import Dict, List, Tuple
 
 
-
 def normalize_audio(audio: np.ndarray) -> tuple[np.ndarray, Dict[str, float]]:
     """
     Normalize an audio signal by subtracting the mean and dividing by the standard deviation.
