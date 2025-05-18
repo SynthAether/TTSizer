@@ -288,8 +288,9 @@ def process_batch_directories():
     SUBFOLDER_NAMES_TO_PROCESS: list[str] = [
         # "fate_1", 
         # "fate_2", 
-        "konosuba_preq", "Madoka_Magica", "sao_1", 
-        "Rezero_s1", "Rezero_s2", "Rezero_s3p1", "Rezero_s3p2", 
+        "konosuba_preq",
+        "sao_1", 
+        # "Rezero_s1", "Rezero_s2", "Rezero_s3p1", "Rezero_s3p2", 
         "sao_2"
     ]
 
@@ -311,7 +312,7 @@ def process_batch_directories():
         separator = VocalSeparator(
             model_path=MODEL_PATH,
             config_path=CONFIG_PATH,
-            output_dir=str(BASE_OUTPUT_DIR), # Placeholder, will be updated per folder
+            output_dir=str(BASE_OUTPUT_DIR),
             model_type=MODEL_TYPE,
             use_gpu=USE_GPU,
             gpu_ids=GPU_IDS,
