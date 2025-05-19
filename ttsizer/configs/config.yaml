@@ -10,8 +10,6 @@ project_setup:
   # List of main character names for LLM diarization.
   # The find_outliers and parakeet stages will typically focus on one of these.
   target_speaker_labels_for_diarization: ["Momo Ayase", "Ken Takakura"]
-  # This will apply to the main character name in the LLM prompt, e.g. {CHARACTER_1}
-  primary_character_for_llm_prompt: "Momo Ayase"
 
 
 # ----------------------------------------------------------------------
@@ -23,20 +21,6 @@ pipeline_control:
   end_stage: null        # e.g., "parakeet_asr" or null to run to the end
   # Note: The actual 'stages_to_run' list is now hardcoded in main.py for fixed order.
   #       Use start_stage, end_stage, or run_only_stage to control execution.
-
-# ----------------------------------------------------------------------
-#                     Global Model Paths
-# Paths are relative to the project root (directory of this config.yaml)
-# ----------------------------------------------------------------------
-global_model_paths:
-  vocal_remover_model: "weights/kimmel_unwa_ft2_bleedless.ckpt"
-  vocal_remover_config: "configs/config_kimmel_unwa_ft.yaml"
-  # For CTC Aligner, model name or path:
-  ctc_aligner_model_name_or_path: "MahmoudAshraf/mms-300m-1130-forced-aligner"
-  # For WeSpeaker (Outlier Detection), path to the *directory* containing model files:
-  speaker_embedding_model_dir: "weights/wespeaker-voxceleb-resnet293-LM" # Was wespeaker_model_dir
-  # For Parakeet ASR, model name:
-  parakeet_asr_model_name: "nvidia/parakeet-tdt-0.6b-v2" # was parakeet_asr_model
 
 # ----------------------------------------------------------------------
 #                Stage-Specific Configurations
@@ -64,6 +48,9 @@ vocal_removal_config:
   output_format: "flac"
   output_pcm_type: "PCM_24"
   skip_if_output_exists: true
+  # Model paths relative to project root
+  model_path: "weights/kimmel_unwa_ft2_bleedless.ckpt"
+  model_config_path: "configs/config_kimmel_unwa_ft.yaml"
   # The actual output will be in: {output_base_dir}/{project_name}/02_vocals_removed/vocals/
 
 # 3. Audio Normalization (for vocals)
@@ -103,6 +90,8 @@ ctc_forced_aligner_config: # Renamed from ctc_align_config
   output_audio_format: "wav" # Output format of aligned clips
   output_audio_subtype: "PCM_24" # Subtype for WAV output
   skip_if_output_exists: true # Episode-level skip
+  # Model name or path for CTC aligner
+  model_name_or_path: "MahmoudAshraf/mms-300m-1130-forced-aligner"
 
 # 6. Find Outliers
 find_outliers_config:
@@ -137,6 +126,8 @@ find_outliers_config:
   uncertain_folder_name: "uncertain_clips"
   max_outlier_percentage_warn: 40.0
   skip_episode_patterns: []
+  # Path to the directory containing WeSpeaker model files
+  speaker_embedding_model_dir: "weights/wespeaker-voxceleb-resnet293-LM"
 
 
 # 7. Parakeet ASR Transcription
@@ -153,7 +144,16 @@ parakeet_asr_config: # Renamed from parakeet_config
   timestamp_deviation_threshold_sec: 0.4
   padding_sec: 0.1 # was padding_sec_for_flagged_crop
   audio_file_format_glob: "*.wav" # Files to process from find_outliers 'filtered' dir
+  # Model name for Parakeet ASR
+  model_name: "nvidia/parakeet-tdt-0.6b-v2"
 
   output_subfolder_names: # Names of subfolders Parakeet script will create *within each source's output dir*
     flagged_cropped: "flagged_for_review_cropped"
     processed_main: "processed_main_dataset" # Contains 16kHz wavs + new txt
+
+# Logging configuration
+logging_config:
+  log_level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  log_dir: "logs"    # Relative to project root
+  log_format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  log_file_prefix: "ttsizer"
