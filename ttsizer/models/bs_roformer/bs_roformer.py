@@ -5,9 +5,9 @@ from torch import nn, einsum, Tensor
 from torch.nn import Module, ModuleList
 import torch.nn.functional as F
 
-from models.bs_roformer.attend import Attend
+from ttsizer.models.bs_roformer.attend import Attend
 try:
-    from models.bs_roformer.attend_sage import Attend as AttendSage
+    from ttsizer.models.bs_roformer.attend_sage import Attend as AttendSage
 except:
     pass
 from torch.utils.checkpoint import checkpoint
