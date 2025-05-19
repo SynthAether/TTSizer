@@ -1,0 +1,98 @@
+# TTSizer Pipeline Configuration v1.1
+
+project_setup:
+  series_name: "ChainsawMan"                                  # Name of the project/series
+  video_input_base_dir: "/Workspace/tr/repos/TTSizer/data/input" # Base directory for raw video/audio input
+  output_base_dir: "/Workspace/tr/repos/TTSizer/data/output"   # Base directory for all processed outputs
+  target_speaker_labels: ["Makima", "Power"]                  # List of target speaker names
+
+pipeline_control:
+  run_only_stage: null            # e.g., "vocals_extract" (runs only this stage), null to disable
+  start_stage: null               # e.g., "llm_diarize" (starts processing from this stage), null to disable
+  end_stage: null                 # e.g., "ctc_align" (ends processing after this stage), null to disable
+
+# 1. Audio Extraction from Video
+audio_extractor:
+  output_folder: "audio"
+  preferred_lang_codes: ["eng", "en", "english"] # Preferred audio stream language codes
+  max_workers: 6
+  output_sample_rate: 44100
+  output_codec: "flac"
+  resolution_threshold_for_aac_step: 480 # Video height (pixels) above which an intermediate AAC step is used
+  intermediate_aac_bitrate: "40k"      # Bitrate for the intermediate AAC audio if used
+
+# 2. Vocals Extraction
+vocals_extractor:
+  output_folder: "vocals"
+  model_type: "mel_band_roformer"     # Type of vocal separation model
+  use_gpu: true
+  gpu_ids: [0]
+  output_format: "flac"
+  output_pcm_type: "PCM_24"
+  skip_if_output_exists: true
+  model_path: "weights/kimmel_unwa_ft2_bleedless.ckpt" # Path to the pre-trained vocal separation model weights
+  model_config_path: "configs/config_kimmel_unwa_ft.yaml" # Path to the model's specific configuration file
+
+# 3. Vocals Normalization
+vocals_normalizer:
+  output_folder: "vocals_normalized"
+  target_lufs: -20.0                  # Target loudness in LUFS (Loudness Units Full Scale)
+  target_tp: -1.5                     # Target true peak in dBTP (decibels True Peak)
+  sample_rate: 44100
+  output_codec: "flac"
+  num_processes: 6
+  ffmpeg_timeout_seconds: 600       # Max time for an FFmpeg normalization process
+  skip_if_output_exists: true
+
+# 4. LLM Diarization & Initial Transcription
+llm_diarizer:
+  output_folder: "transcriptions"
+  model_name: "gemini-1.5-flash-preview-0514"  # LLM model for diarization
+  temperature: 0.1                    # LLM generation temperature
+  top_p: 0.8                          # LLM generation top_p
+  prompt_template_file: "configs/prompt_template.txt" # Path to the prompt template for the LLM
+  skip_if_output_exists: true
+
+# 5. CTC Forced Alignment
+ctc_aligner:
+  output_folder: "aligned_clips"
+  language_code: "en"                 # Language code for text preprocessing
+  batch_size: 8
+  use_gpu: true
+  start_pad_seconds: 0.4              # Padding added to the start of audio segments before alignment
+  end_pad_seconds: 0.7                # Padding added to the end of audio segments before alignment
+  min_words_per_segment: 2            # Minimum words required in a transcript segment to be processed
+  min_duration_seconds_segment: 0.5   # Minimum duration (seconds) of a transcript segment to be processed
+  output_audio_format: "wav"
+  output_audio_subtype: "PCM_24"
+  model_name: "MahmoudAshraf/mms-300m-1130-forced-aligner" # CTC model for forced alignment
+
+# 6. Find Outliers
+outlier_detector:
+  output_folder: "final"              # Subdirectory within speaker's output for final "definite" clips
+  target_sample_rate: 16000           # Sample rate for audio embeddings
+  use_gpu: true
+  min_clip_duration_seconds: 0.75     # Minimum duration (seconds) for a clip to be considered for embedding/profiling
+  min_segments_for_master_profile: 10 # Minimum number of segments to create an initial speaker profile
+  centroid_refinement_percentile: 50  # Percentile of closest embeddings used to refine the speaker profile centroid
+  min_segments_for_refinement: 10     # Minimum number of segments required to attempt profile refinement
+  outlier_threshold_definite: 0.70    # Cosine distance threshold; if > this, considered a definite
+  outlier_threshold_uncertain: 0.60   # Cosine distance threshold; if > this (and <= definite), considered uncertain
+  embedding_model_path: "weights/wespeaker-voxceleb-resnet293-LM" # Path to the speaker embedding model
+
+# 7. ASR Transcription
+asr_processor:
+  output_folder: "final"              # Output folder for ASR results
+  batch_size: 4
+  device: "cuda"
+  timestamp_deviation_threshold_sec: 0.4 # Max deviation (seconds) between ASR timestamps and audio file boundaries before flagging
+  padding_sec: 0.1                    # Padding (seconds) added to start/end of flagged audio clips
+  model_name: "nvidia/parakeet-tdt-0.6b-v2"
+  flagged_output_folder: "flagged_for_timestamp_mismatch"
+
+# Logging configuration
+logging_config:
+  log_level: "INFO"                   # Logging level (e.g., DEBUG, INFO, WARNING, ERROR)
+  log_dir: "logs"                     # Directory to save log files
+  log_format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s" # Format for log messages
+  log_file_prefix: "ttsizer"          # Prefix for log file names
