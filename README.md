@@ -1,12 +1,9 @@
-# TTSizer: Your End-to-End TTS Dataset Preparation Pipeline 🎙️✂️📊
+# TTSizer: End-to-End TTS Dataset Preparation Pipeline 🎙️✂️📊
 
 TTSizer automates the creation of high-quality Text-To-Speech (TTS) datasets from raw audio/video. It processes multi-speaker content by performing speaker diarization, then extracts, cleans, and aligns audio clips for each target speaker. This comprehensive pipeline streamlines the often laborious journey from raw media to a structured, TTS-ready dataset through stages like vocal separation, normalization, forced alignment, and outlier detection.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python Version](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
-<!-- Add more badges here if you set up CI/CD, code coverage, etc. -->
-<!-- Example: [![Build Status](https://travis-ci.org/your_username/TTSizer.svg?branch=main)](https://travis-ci.org/your_username/TTSizer) -->
-<!-- Example: [![Coverage Status](https://coveralls.io/repos/github/your_username/TTSizer/badge.svg?branch=main)](https://coveralls.io/github/your_username/TTSizer?branch=main) -->
 
 ## ✨ Core Features
 
@@ -219,12 +216,6 @@ vocals_extractor:
 
 ## 📜 License
 
-This project is licensed under the Apache License, Version 2.0. You may obtain a copy of the License at:
+## License
 
-   http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUTHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+This project is released under the Apache License 2.0. See the [LICENSE](LICENSE) file for details.
