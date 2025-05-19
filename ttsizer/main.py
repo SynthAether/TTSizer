@@ -197,8 +197,8 @@ class PipelineOrchestrator:
                 self.runners[stage]()
 
 def main():
-    # Allow overriding config path via environment variable, otherwise default to "configs/config.yaml"
-    cfg_path = os.getenv("TTSIZER_CONFIG", "configs/config.yaml")
+    # Allow overriding config path via environment variable, otherwise default to "ttsizer/configs/config.yaml"
+    cfg_path = os.getenv("TTSIZER_CONFIG", "ttsizer/configs/config.yaml")
     print(f"Starting pipeline with config: {cfg_path}")
     
     try:

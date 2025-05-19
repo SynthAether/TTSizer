@@ -4,11 +4,9 @@
 #                  Core Project Setup (User Inputs)
 # ----------------------------------------------------------------------
 project_setup:
-  project_name: "MyAnimeProject" # Name of the current anime or dataset project
-  video_source_parent_dir: "/home/taresh/Downloads/anime/videos" # Base directory for video sources
-  output_base_dir: "/home/taresh/Downloads/anime/audios_processed" # Base directory for ALL processed outputs
-  # List of main character names for LLM diarization.
-  # The find_outliers and parakeet stages will typically focus on one of these.
+  project_name: "MyAnimeProject"
+  video_source_parent_dir: "/home/taresh/Downloads/anime/videos"
+  output_base_dir: "/home/taresh/Downloads/anime/audios_processed"
   target_speaker_labels_for_diarization: ["Momo Ayase", "Ken Takakura"]
 
 
@@ -16,11 +14,9 @@ project_setup:
 #                     Pipeline Control
 # ----------------------------------------------------------------------
 pipeline_control:
-  run_only_stage: null   # e.g., "extract_audio", "vocal_removal", etc. or null to run sequence
-  start_stage: null      # e.g., "extract_audio" or null to start from beginning
-  end_stage: null        # e.g., "parakeet_asr" or null to run to the end
-  # Note: The actual 'stages_to_run' list is now hardcoded in main.py for fixed order.
-  #       Use start_stage, end_stage, or run_only_stage to control execution.
+  run_only_stage: null
+  start_stage: null
+  end_stage: null
 
 # ----------------------------------------------------------------------
 #                Stage-Specific Configurations
@@ -30,14 +26,13 @@ pipeline_control:
 
 # 1. Audio Extraction from Video
 extract_audio_config:
-  output_stage_folder_name: "01_extracted_audio" # Subfolder in project's output dir
+  output_stage_folder_name: "01_extracted_audio"
   preferred_lang_codes: ["eng", "en", "english"]
   max_workers: 6
   output_sample_rate: 44100
   output_codec: "flac"
   resolution_threshold_for_aac_step: 480
   intermediate_aac_bitrate: "40k"
-  # The actual output will be in: {output_base_dir}/{project_name}/01_extracted_audio/orig/
 
 # 2. Vocal Removal
 vocal_removal_config:
@@ -48,112 +43,85 @@ vocal_removal_config:
   output_format: "flac"
   output_pcm_type: "PCM_24"
   skip_if_output_exists: true
-  # Model paths relative to project root
   model_path: "weights/kimmel_unwa_ft2_bleedless.ckpt"
   model_config_path: "configs/config_kimmel_unwa_ft.yaml"
-  # The actual output will be in: {output_base_dir}/{project_name}/02_vocals_removed/vocals/
 
 # 3. Audio Normalization (for vocals)
-normalize_audio_config: # Renamed from normalize_vocals_config
+normalize_audio_config:
   output_stage_folder_name: "03_vocals_normalized"
   target_lufs: -20.0
   target_tp: -1.5
-  sample_rate: 44100 # Changed from output_sample_rate
-  output_codec: "flac" # Added, normalizer will output to this format
+  sample_rate: 44100
+  output_codec: "flac"
   num_processes: 6
   ffmpeg_timeout_seconds: 600
   skip_if_output_exists: true
 
 # 4. LLM Diarization & Initial Transcription
-llm_diarizer_config: # Renamed from gemini_call_config
+llm_diarizer_config:
   output_stage_folder_name: "04_llm_diarized_json"
-  # api_key_env_var: "GEMINI_API_KEY" # Handled by user environment
   model_name: "gemini-1.5-flash-latest"
   temperature: 0.1
   top_p: 0.8
-  prompt_template_file: "prompt_template.txt" # Relative to project root
+  prompt_template_file: "prompt_template.txt"
   skip_if_output_exists: true
-  # characters_of_interest and primary_character_for_prompt moved to project_setup
 
 # 5. CTC Forced Alignment
-ctc_forced_aligner_config: # Renamed from ctc_align_config
+ctc_forced_aligner_config:
   output_stage_folder_name: "05_aligned_clips"
-  # target_speakers_of_interest: [] # This will be dynamically handled by orchestrator if needed from find_outliers sources
-  language_code: "en" # was aligner_lang
-  batch_size: 8 # was aligner_batch_size
+  language_code: "en"
+  batch_size: 8
   use_gpu: true
-  init_start_pad_seconds: 0.4 # was init_start_pad_sec
-  init_end_pad_seconds: 0.7   # was init_end_pad_sec
-  min_words_per_segment: 2    # was min_words_for_segment
-  min_duration_seconds_segment: 0.5 # was min_duration_sec_for_segment
-  skip_episode_patterns: [] # e.g. ['_NCED', '_NCOP'] for skipping non-content
-  output_audio_format: "wav" # Output format of aligned clips
-  output_audio_subtype: "PCM_24" # Subtype for WAV output
-  skip_if_output_exists: true # Episode-level skip
-  # Model name or path for CTC aligner
+  init_start_pad_seconds: 0.4
+  init_end_pad_seconds: 0.7
+  min_words_per_segment: 2
+  min_duration_seconds_segment: 0.5
+  skip_episode_patterns: []
+  output_audio_format: "wav"
+  output_audio_subtype: "PCM_24"
+  skip_if_output_exists: true
   model_name_or_path: "MahmoudAshraf/mms-300m-1130-forced-aligner"
 
 # 6. Find Outliers
 find_outliers_config:
-  # 'output_stage_folder_name' defines the top-level for this stage's outputs.
-  # e.g., 06_outliers_filtered
-  # Inside this, subdirectories based on 'project_audio_sources.input_subpath_relative_to_input_stage'
-  # will be created, containing 'filtered', 'outliers', 'uncertain' folders.
   output_stage_folder_name: "06_outliers_filtered"
-  
-  # This 'input_stage_folder_name' tells 'find_outliers' which *previous* stage's output to read from.
-  # Typically, this will be the output_stage_folder_name of 'ctc_forced_aligner_config'.
-  input_stage_folder_name: "05_aligned_clips" # Source of input for this stage
-
-  # Defines the different audio sources within the 'input_stage_folder_name' to process.
-  # Each item represents a distinct speaker or a group of audio files to be processed together.
+  input_stage_folder_name: "05_aligned_clips"
   project_audio_sources:
-    - input_subpath_relative_to_input_stage: "Momo_Ayase_aligned" # Subfolder within '05_aligned_clips'
-      target_speaker_label: "Momo Ayase" # Must match a name from project_setup.target_speaker_labels_for_diarization
-    # - input_subpath_relative_to_input_stage: "Ken_Takakura_aligned"
-    #   target_speaker_label: "Ken Takakura"
+    - input_subpath_relative_to_input_stage: "Momo_Ayase_aligned"
+      target_speaker_label: "Momo Ayase"
 
-  audio_file_format_glob: "*.wav" # Format of aligned clips, was input_file_format
-  target_sample_rate: 16000 # For Parakeet input compatibility
+  audio_file_format_glob: "*.wav"
+  target_sample_rate: 16000
   use_gpu: true
-  min_clip_duration_seconds: 0.75 # was min_clip_duration_seconds_for_embedding
+  min_clip_duration_seconds: 0.75
   centroid_refinement_percentile: 50
   min_segments_for_refinement: 10
   min_segments_for_master_profile: 10
   outlier_threshold_definite: 0.70
   outlier_threshold_uncertain: 0.60
-  move_uncertain_files: true # was move_uncertain_clips
+  move_uncertain_files: true
   uncertain_folder_name: "uncertain_clips"
   max_outlier_percentage_warn: 40.0
   skip_episode_patterns: []
-  # Path to the directory containing WeSpeaker model files
   speaker_embedding_model_dir: "weights/wespeaker-voxceleb-resnet293-LM"
 
 
 # 7. Parakeet ASR Transcription
-parakeet_asr_config: # Renamed from parakeet_config
-  # 'output_stage_folder_name' defines the top-level for this stage's outputs.
-  # e.g., 07_parakeet_transcribed
-  # Inside this, subdirectories based on the 'input_subpath_relative_to_input_stage' from
-  # 'find_outliers_config.project_audio_sources' will be created.
+parakeet_asr_config:
   output_stage_folder_name: "07_parakeet_transcribed"
-  
-  # speaker_name_fs_safe is now implicitly handled by the folder structure derived from find_outliers_config
   batch_size: 4
   device: "cuda"
   timestamp_deviation_threshold_sec: 0.4
-  padding_sec: 0.1 # was padding_sec_for_flagged_crop
-  audio_file_format_glob: "*.wav" # Files to process from find_outliers 'filtered' dir
-  # Model name for Parakeet ASR
+  padding_sec: 0.1
+  audio_file_format_glob: "*.wav"
   model_name: "nvidia/parakeet-tdt-0.6b-v2"
-
-  output_subfolder_names: # Names of subfolders Parakeet script will create *within each source's output dir*
+  output_subfolder_names:
     flagged_cropped: "flagged_for_review_cropped"
-    processed_main: "processed_main_dataset" # Contains 16kHz wavs + new txt
+    processed_main: "processed_main_dataset"
 
 # Logging configuration
 logging_config:
-  log_level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
-  log_dir: "logs"    # Relative to project root
+  log_level: "INFO"
+  log_dir: "logs"
   log_format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
   log_file_prefix: "ttsizer"
