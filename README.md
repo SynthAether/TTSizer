@@ -1,10 +1,11 @@
 # TTSizer 🎙️✨
 ### Transform Raw Audio/Video into Production-Ready TTS Datasets
 
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Python Version](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
+<!--**Watch the TTSizer Demo & See It In Action:**-->
 
-![](assets/img.jpeg)
+[![TTSizer Demo Video](https://img.youtube.com/vi/POwMVTwsZDQ/hqdefault.jpg)](https://youtu.be/POwMVTwsZDQ?si=rxNy7grLyROhdIEd)
+
+*(The demo above showcases the [AnimeVox Character TTS Corpus](https://huggingface.co/datasets/taresh18/AnimeVox), a dataset created using TTSizer.)*
 
 ## 🎯 What It Does
 
@@ -69,6 +70,7 @@ python -m ttsizer.main
 
 ### Prerequisites
 - Python 3.9+
+- CUDA enabled GPU (>4GB VRAM)
 - FFmpeg (Must be installed and accessible in your system's PATH)
 - Google Gemini API key
 
