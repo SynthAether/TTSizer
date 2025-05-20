@@ -1,19 +1,14 @@
 # TTSizer 🎙️✨
+### Transform Raw Audio/Video into Production-Ready TTS Datasets
 
-<!--**Watch the TTSizer Demo & See It In Action:**
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Python Version](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
 
-[![TTSizer Demo Video](https://img.youtube.com/vi/POwMVTwsZDQ/hqdefault.jpg)](https://youtu.be/POwMVTwsZDQ?si=rxNy7grLyROhdIEd)
-
-*(The demo above showcases the [AnimeVox Character TTS Corpus](https://huggingface.co/datasets/taresh18/AnimeVox), a dataset created using TTSizer.)*-->
-
-<p align="center">
-  <strong>Transform Raw Audio/Video into Production-Ready TTS Datasets</strong><br>
-  <a href="https://youtu.be/POwMVTwsZDQ?si=rxNy7grLyROhdIEd" target="_blank">
-    <img src="https://img.youtube.com/vi/POwMVTwsZDQ/hqdefault.jpg" alt="TTSizer Demo Video" width="640">
-  </a>
-  <br>
-  <em>(The demo above showcases the <a href="https://huggingface.co/datasets/taresh18/AnimeVox" target="_blank">AnimeVox Character TTS Corpus</a>, a dataset created using TTSizer.)</em>
-</p>
+**Watch the TTSizer Demo & See It In Action:**
+<a href="https://youtu.be/POwMVTwsZDQ?si=rxNy7grLyROhdIEd" target="_blank">
+  <img src="https://img.youtube.com/vi/POwMVTwsZDQ/maxresdefault.jpg" alt="TTSizer Demo Video" style="width:100%; max-width:960px; height:auto; display:block; margin-left:auto; margin-right:auto;">
+</a>
+<em>(The demo above showcases the <a href="https://huggingface.co/datasets/taresh18/AnimeVox" target="_blank">AnimeVox Character TTS Corpus</a>, a dataset created using TTSizer.)</em>
 
 ## 🎯 What It Does
 
