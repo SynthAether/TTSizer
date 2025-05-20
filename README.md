@@ -1,11 +1,19 @@
 # TTSizer 🎙️✨
-### Transform Raw Audio/Video into Production-Ready TTS Datasets
 
-<!--**Watch the TTSizer Demo & See It In Action:**-->
+<!--**Watch the TTSizer Demo & See It In Action:**
 
 [![TTSizer Demo Video](https://img.youtube.com/vi/POwMVTwsZDQ/hqdefault.jpg)](https://youtu.be/POwMVTwsZDQ?si=rxNy7grLyROhdIEd)
 
-*(The demo above showcases the [AnimeVox Character TTS Corpus](https://huggingface.co/datasets/taresh18/AnimeVox), a dataset created using TTSizer.)*
+*(The demo above showcases the [AnimeVox Character TTS Corpus](https://huggingface.co/datasets/taresh18/AnimeVox), a dataset created using TTSizer.)*-->
+
+<p align="center">
+  <strong>Transform Raw Audio/Video into Production-Ready TTS Datasets</strong><br>
+  <a href="https://youtu.be/POwMVTwsZDQ?si=rxNy7grLyROhdIEd" target="_blank">
+    <img src="https://img.youtube.com/vi/POwMVTwsZDQ/hqdefault.jpg" alt="TTSizer Demo Video" width="640">
+  </a>
+  <br>
+  <em>(The demo above showcases the <a href="https://huggingface.co/datasets/taresh18/AnimeVox" target="_blank">AnimeVox Character TTS Corpus</a>, a dataset created using TTSizer.)</em>
+</p>
 
 ## 🎯 What It Does
 
