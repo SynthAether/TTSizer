@@ -1,8 +1,3 @@
-## Executive Summary
-This specification outlines a comprehensive methodology for generating precise speaker-labeled transcriptions of anime episodes with accurate timestamps. The process prioritizes **speaker identification accuracy and consistency across the entire episode**, timestamp accuracy, with verbatim transcription as a secondary goal. **Failure to maintain consistent speaker labels for the same voice throughout the episode is a critical error.**
-
----
-
 ## Objective
 Generate highly accurate **speaker labels (consistent throughout) and timestamps** (in **MM:SS.mmm format**) for dialogue segments within the **entire provided anime episode audio file (typically 21-24 minutes long)**, processing it as a **single cohesive unit**. Provide verbatim transcription as a secondary goal.
 
@@ -195,4 +190,4 @@ Before finalizing the output, mentally perform these checks:
 	}
 ]```
 
-Please proceed with the analysis, diarization, and transcription of the **entire audio file** based on these **strict priorities, detailed full-episode processing instructions, and MANDATORY speaker label consistency.**
+Proceed with the analysis, diarization, and transcription of the **entire audio file** based on these **strict priorities, detailed full-episode processing instructions, and MANDATORY speaker label consistency.**
